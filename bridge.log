@@ -1,0 +1,161 @@
+2025-04-14 13:50:35,535 - ollama-ghidra-bridge.ollama - INFO - Initialized Ollama client with model: cogito:32b
+2025-04-14 13:50:35,719 - ollama-ghidra-bridge.ghidra - INFO - Initialized GhidraMCP client at: http://localhost:8080
+2025-04-14 13:50:35,719 - ollama-ghidra-bridge - INFO - Bridge initialized with Ollama at http://localhost:11434 and GhidraMCP at http://localhost:8080
+2025-04-14 13:51:37,986 - ollama-ghidra-bridge - INFO - Sending query to Ollama: analyze the binary and tell me its purpose...
+2025-04-14 13:51:49,357 - httpx - INFO - HTTP Request: POST http://localhost:11434/api/generate "HTTP/1.1 200 OK"
+2025-04-14 13:51:54,413 - ollama-ghidra-bridge.ollama - ERROR - Error communicating with Ollama: Extra data: line 2 column 1 (char 94)
+2025-04-14 13:51:54,413 - ollama-ghidra-bridge - ERROR - Error: Extra data: line 2 column 1 (char 94)
+2025-04-14 14:03:23,234 - ollama-ghidra-bridge.ollama - INFO - Initialized Ollama client with model: cogito:32b
+2025-04-14 14:03:23,420 - ollama-ghidra-bridge.ghidra - INFO - Initialized GhidraMCP client at: http://localhost:8080
+2025-04-14 14:03:23,420 - ollama-ghidra-bridge - INFO - Bridge initialized with Ollama at http://localhost:11434 and GhidraMCP at http://localhost:8080
+2025-04-14 14:03:34,218 - ollama-ghidra-bridge - INFO - Sending query to Ollama: analyze the binary and give me a prediction on it's overall behavior...
+2025-04-14 14:03:45,851 - httpx - INFO - HTTP Request: POST http://localhost:11434/api/generate "HTTP/1.1 200 OK"
+2025-04-14 14:03:45,851 - ollama-ghidra-bridge - INFO - Received response from Ollama: I'll help you analyze the binary step by step to predict its overall behavior. Let's start with some...
+2025-04-14 14:03:45,852 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: get_memory_map with params: {}
+2025-04-14 14:03:45,867 - httpx - INFO - HTTP Request: POST http://localhost:8080/get_memory_map "HTTP/1.1 404 Not Found"
+2025-04-14 14:03:45,868 - ollama-ghidra-bridge.ghidra - ERROR - Error executing GhidraMCP command get_memory_map: Client error '404 Not Found' for url 'http://localhost:8080/get_memory_map'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2025-04-14 14:03:45,868 - ollama-ghidra-bridge - ERROR - ERROR: Failed to execute 'get_memory_map': Client error '404 Not Found' for url 'http://localhost:8080/get_memory_map'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2025-04-14 14:03:45,868 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: list_functions with params: {}
+2025-04-14 14:03:45,886 - httpx - INFO - HTTP Request: POST http://localhost:8080/list_functions "HTTP/1.1 200 OK"
+2025-04-14 14:03:45,886 - ollama-ghidra-bridge.ghidra - ERROR - Error executing GhidraMCP command list_functions: Expecting value: line 1 column 1 (char 0)
+2025-04-14 14:03:45,886 - ollama-ghidra-bridge - ERROR - ERROR: Failed to execute 'list_functions': Expecting value: line 1 column 1 (char 0)
+2025-04-14 14:03:45,886 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: get_imports with params: {}
+2025-04-14 14:03:45,887 - httpx - INFO - HTTP Request: POST http://localhost:8080/get_imports "HTTP/1.1 404 Not Found"
+2025-04-14 14:03:45,887 - ollama-ghidra-bridge.ghidra - ERROR - Error executing GhidraMCP command get_imports: Client error '404 Not Found' for url 'http://localhost:8080/get_imports'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2025-04-14 14:03:45,887 - ollama-ghidra-bridge - ERROR - ERROR: Failed to execute 'get_imports': Client error '404 Not Found' for url 'http://localhost:8080/get_imports'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2025-04-14 14:03:45,887 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: get_exports with params: {}
+2025-04-14 14:03:45,900 - httpx - INFO - HTTP Request: POST http://localhost:8080/get_exports "HTTP/1.1 404 Not Found"
+2025-04-14 14:03:45,900 - ollama-ghidra-bridge.ghidra - ERROR - Error executing GhidraMCP command get_exports: Client error '404 Not Found' for url 'http://localhost:8080/get_exports'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2025-04-14 14:03:45,900 - ollama-ghidra-bridge - ERROR - ERROR: Failed to execute 'get_exports': Client error '404 Not Found' for url 'http://localhost:8080/get_exports'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2025-04-14 14:03:45,901 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: decompile_function with params: {'address': 'suspected_address'}
+2025-04-14 14:03:45,915 - httpx - INFO - HTTP Request: POST http://localhost:8080/decompile_function "HTTP/1.1 200 OK"
+2025-04-14 14:03:45,915 - ollama-ghidra-bridge.ghidra - ERROR - Error executing GhidraMCP command decompile_function: Expecting value: line 1 column 1 (char 0)
+2025-04-14 14:03:45,915 - ollama-ghidra-bridge - ERROR - ERROR: Failed to execute 'decompile_function': Expecting value: line 1 column 1 (char 0)
+2025-04-14 14:03:45,915 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: search_strings with params: {'pattern': '%252'}
+2025-04-14 14:03:45,916 - httpx - INFO - HTTP Request: POST http://localhost:8080/search_strings "HTTP/1.1 404 Not Found"
+2025-04-14 14:03:45,916 - ollama-ghidra-bridge.ghidra - ERROR - Error executing GhidraMCP command search_strings: Client error '404 Not Found' for url 'http://localhost:8080/search_strings'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2025-04-14 14:03:45,916 - ollama-ghidra-bridge - ERROR - ERROR: Failed to execute 'search_strings': Client error '404 Not Found' for url 'http://localhost:8080/search_strings'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2025-04-14 14:04:22,725 - ollama-ghidra-bridge - INFO - Sending query to Ollama: what does the entry function do...
+2025-04-14 14:04:30,986 - httpx - INFO - HTTP Request: POST http://localhost:11434/api/generate "HTTP/1.1 200 OK"
+2025-04-14 14:04:30,986 - ollama-ghidra-bridge - INFO - Received response from Ollama: To analyze the entry point function in the binary, let's try to decompile it first:
+
+EXECUTE: decomp...
+2025-04-14 14:04:30,987 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: decompile_function with params: {'address': '0x1000'}
+2025-04-14 14:04:31,005 - httpx - INFO - HTTP Request: POST http://localhost:8080/decompile_function "HTTP/1.1 200 OK"
+2025-04-14 14:04:31,005 - ollama-ghidra-bridge.ghidra - ERROR - Error executing GhidraMCP command decompile_function: Expecting value: line 1 column 1 (char 0)
+2025-04-14 14:04:31,005 - ollama-ghidra-bridge - ERROR - ERROR: Failed to execute 'decompile_function': Expecting value: line 1 column 1 (char 0)
+2025-04-14 14:04:31,005 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: get_references with params: {'address': '0x1000'}
+2025-04-14 14:04:31,006 - httpx - INFO - HTTP Request: POST http://localhost:8080/get_references "HTTP/1.1 404 Not Found"
+2025-04-14 14:04:31,006 - ollama-ghidra-bridge.ghidra - ERROR - Error executing GhidraMCP command get_references: Client error '404 Not Found' for url 'http://localhost:8080/get_references'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2025-04-14 14:04:31,006 - ollama-ghidra-bridge - ERROR - ERROR: Failed to execute 'get_references': Client error '404 Not Found' for url 'http://localhost:8080/get_references'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2025-04-14 14:04:31,006 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: comment_function with params: {'address': '0x1000', 'comment': 'Entry Point Analysis'}
+2025-04-14 14:04:31,019 - httpx - INFO - HTTP Request: POST http://localhost:8080/comment_function "HTTP/1.1 404 Not Found"
+2025-04-14 14:04:31,019 - ollama-ghidra-bridge.ghidra - ERROR - Error executing GhidraMCP command comment_function: Client error '404 Not Found' for url 'http://localhost:8080/comment_function'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2025-04-14 14:04:31,019 - ollama-ghidra-bridge - ERROR - ERROR: Failed to execute 'comment_function': Client error '404 Not Found' for url 'http://localhost:8080/comment_function'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+2025-04-14 14:11:50,512 - ollama-ghidra-bridge.ollama - INFO - Initialized Ollama client with model: llama3
+2025-04-14 14:11:50,696 - ollama-ghidra-bridge.ghidra - INFO - Initialized GhidraMCP client at: http://localhost:8080/api
+2025-04-14 14:11:50,711 - httpx - INFO - HTTP Request: GET http://localhost:8080/api/version "HTTP/1.1 404 Not Found"
+2025-04-14 14:11:50,711 - ollama-ghidra-bridge.ghidra - WARNING - Failed to detect API version: status code 404
+2025-04-14 14:11:50,727 - httpx - INFO - HTTP Request: GET http://localhost:8080/api/commands "HTTP/1.1 404 Not Found"
+2025-04-14 14:11:50,727 - ollama-ghidra-bridge - INFO - Bridge initialized with Ollama at http://localhost:11434 and GhidraMCP at http://localhost:8080/api
+2025-04-14 14:12:21,590 - ollama-ghidra-bridge.ollama - INFO - Initialized Ollama client with model: cogito:32b
+2025-04-14 14:12:21,764 - ollama-ghidra-bridge.ghidra - INFO - Initialized GhidraMCP client at: http://localhost:8080/api
+2025-04-14 14:12:21,778 - httpx - INFO - HTTP Request: GET http://localhost:8080/api/version "HTTP/1.1 404 Not Found"
+2025-04-14 14:12:21,778 - ollama-ghidra-bridge.ghidra - WARNING - Failed to detect API version: status code 404
+2025-04-14 14:12:21,798 - httpx - INFO - HTTP Request: GET http://localhost:8080/api/commands "HTTP/1.1 404 Not Found"
+2025-04-14 14:12:21,798 - ollama-ghidra-bridge - INFO - Bridge initialized with Ollama at http://localhost:11434 and GhidraMCP at http://localhost:8080/api
+2025-04-14 14:12:33,812 - ollama-ghidra-bridge - INFO - Sending query to Ollama: analyze the binary and try to tell me what the purpose of the binary is...
+2025-04-14 14:12:45,858 - httpx - INFO - HTTP Request: POST http://localhost:11434/api/generate "HTTP/1.1 200 OK"
+2025-04-14 14:12:45,859 - ollama-ghidra-bridge - INFO - Received response from Ollama: I'll help you analyze the binary step by step using Ghidra's capabilities. Let's start with some ini...
+2025-04-14 14:12:45,859 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: get_memory_map with params: {}
+2025-04-14 14:12:45,870 - httpx - INFO - HTTP Request: POST http://localhost:8080/api/get_memory_map "HTTP/1.1 404 Not Found"
+2025-04-14 14:12:45,870 - ollama-ghidra-bridge.ghidra - ERROR - Endpoint not found: http://localhost:8080/api/get_memory_map
+2025-04-14 14:12:45,870 - ollama-ghidra-bridge - ERROR - ERROR: Endpoint not found: http://localhost:8080/api/get_memory_map
+2025-04-14 14:12:45,870 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: get_imports with params: {}
+2025-04-14 14:12:45,890 - httpx - INFO - HTTP Request: POST http://localhost:8080/api/get_imports "HTTP/1.1 404 Not Found"
+2025-04-14 14:12:45,890 - ollama-ghidra-bridge.ghidra - ERROR - Endpoint not found: http://localhost:8080/api/get_imports
+2025-04-14 14:12:45,890 - ollama-ghidra-bridge - ERROR - ERROR: Endpoint not found: http://localhost:8080/api/get_imports
+2025-04-14 14:12:45,890 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: get_exports with params: {}
+2025-04-14 14:12:45,910 - httpx - INFO - HTTP Request: POST http://localhost:8080/api/get_exports "HTTP/1.1 404 Not Found"
+2025-04-14 14:12:45,910 - ollama-ghidra-bridge.ghidra - ERROR - Endpoint not found: http://localhost:8080/api/get_exports
+2025-04-14 14:12:45,911 - ollama-ghidra-bridge - ERROR - ERROR: Endpoint not found: http://localhost:8080/api/get_exports
+2025-04-14 14:12:45,911 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: list_functions with params: {}
+2025-04-14 14:12:45,931 - httpx - INFO - HTTP Request: POST http://localhost:8080/api/list_functions "HTTP/1.1 404 Not Found"
+2025-04-14 14:12:45,932 - ollama-ghidra-bridge.ghidra - ERROR - Endpoint not found: http://localhost:8080/api/list_functions
+2025-04-14 14:12:45,932 - ollama-ghidra-bridge - ERROR - ERROR: Endpoint not found: http://localhost:8080/api/list_functions
+2025-04-14 14:12:45,932 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: search_strings with params: {'pattern': '.*'}
+2025-04-14 14:12:45,933 - httpx - INFO - HTTP Request: POST http://localhost:8080/api/search_strings "HTTP/1.1 404 Not Found"
+2025-04-14 14:12:45,933 - ollama-ghidra-bridge.ghidra - ERROR - Endpoint not found: http://localhost:8080/api/search_strings
+2025-04-14 14:12:45,933 - ollama-ghidra-bridge - ERROR - ERROR: Endpoint not found: http://localhost:8080/api/search_strings
+2025-04-14 14:22:52,463 - ollama-ghidra-bridge.ollama - INFO - Initialized Ollama client with model: cogito:32b
+2025-04-14 14:22:52,646 - ollama-ghidra-bridge.ghidra - INFO - Initialized GhidraMCP client at: http://localhost:8080/api
+2025-04-14 14:22:52,662 - httpx - INFO - HTTP Request: GET http://localhost:8080/api/methods "HTTP/1.1 404 Not Found"
+2025-04-14 14:22:52,662 - ollama-ghidra-bridge.ghidra - WARNING - Failed to connect to GhidraMCP API: status code 404
+2025-04-14 14:22:52,663 - ollama-ghidra-bridge - INFO - Bridge initialized with Ollama at http://localhost:11434 and GhidraMCP at http://localhost:8080/api
+2025-04-14 14:22:59,271 - ollama-ghidra-bridge - INFO - Sending query to Ollama: Tell me what the current function does...
+2025-04-14 14:23:07,558 - httpx - INFO - HTTP Request: POST http://localhost:11434/api/generate "HTTP/1.1 200 OK"
+2025-04-14 14:23:07,558 - ollama-ghidra-bridge - INFO - Received response from Ollama: To determine what the current function does, I'll need to first identify which function is currently...
+2025-04-14 14:23:07,558 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: get_current_address with params: {}
+2025-04-14 14:23:07,571 - httpx - INFO - HTTP Request: GET http://localhost:8080/api/get_current_address "HTTP/1.1 404 Not Found"
+2025-04-14 14:23:07,571 - ollama-ghidra-bridge.ghidra - ERROR - Endpoint not found: http://localhost:8080/api/get_current_address
+2025-04-14 14:23:40,104 - ollama-ghidra-bridge - INFO - Sending query to Ollama: What can you tell me about the memory map...
+2025-04-14 14:23:46,186 - httpx - INFO - HTTP Request: POST http://localhost:11434/api/generate "HTTP/1.1 200 OK"
+2025-04-14 14:23:46,189 - ollama-ghidra-bridge - INFO - Received response from Ollama: To analyze the memory map, I'll start by listing the segments to see how memory is organized:
+
+EXECU...
+2025-04-14 14:23:46,189 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: list_segments with params: {'offset': '0', 'limit': '20'}
+2025-04-14 14:23:46,198 - httpx - INFO - HTTP Request: GET http://localhost:8080/api/segments?offset=0&limit=20 "HTTP/1.1 404 Not Found"
+2025-04-14 14:23:46,198 - ollama-ghidra-bridge.ghidra - ERROR - Endpoint not found: http://localhost:8080/api/segments
+2025-04-14 14:24:27,267 - ollama-ghidra-bridge - INFO - Sending query to Ollama: what can you tell me about the behavior of the entry function...
+2025-04-14 14:24:34,910 - httpx - INFO - HTTP Request: POST http://localhost:11434/api/generate "HTTP/1.1 200 OK"
+2025-04-14 14:24:34,910 - ollama-ghidra-bridge - INFO - Received response from Ollama: To analyze the entry function's behavior, let's start by identifying the entry point and examining i...
+2025-04-14 14:24:34,910 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: decompile_function_by_address with params: {'address': '0x1000'}
+2025-04-14 14:24:34,923 - httpx - INFO - HTTP Request: GET http://localhost:8080/api/decompile_function?address=0x1000 "HTTP/1.1 404 Not Found"
+2025-04-14 14:24:34,924 - ollama-ghidra-bridge.ghidra - ERROR - Endpoint not found: http://localhost:8080/api/decompile_function
+2025-04-14 14:24:34,924 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: disassemble_function with params: {'address': '0x1000'}
+2025-04-14 14:24:34,943 - httpx - INFO - HTTP Request: GET http://localhost:8080/api/disassemble_function?address=0x1000 "HTTP/1.1 404 Not Found"
+2025-04-14 14:24:34,943 - ollama-ghidra-bridge.ghidra - ERROR - Endpoint not found: http://localhost:8080/api/disassemble_function
+2025-04-14 14:24:34,944 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: list_data_items with params: {'offset': '0', 'limit': '20'}
+2025-04-14 14:24:34,964 - httpx - INFO - HTTP Request: GET http://localhost:8080/api/data?offset=0&limit=20 "HTTP/1.1 404 Not Found"
+2025-04-14 14:24:34,965 - ollama-ghidra-bridge.ghidra - ERROR - Endpoint not found: http://localhost:8080/api/data
+2025-04-14 14:24:55,698 - ollama-ghidra-bridge - INFO - Sending query to Ollama: provide me all the information you have on the binary ...
+2025-04-14 14:25:05,519 - httpx - INFO - HTTP Request: POST http://localhost:11434/api/generate "HTTP/1.1 200 OK"
+2025-04-14 14:25:05,520 - ollama-ghidra-bridge - INFO - Received response from Ollama: I'll gather comprehensive information about the binary using multiple Ghidra commands:
+
+1. First, le...
+2025-04-14 14:25:05,520 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: list_functions with params: {}
+2025-04-14 14:25:05,545 - httpx - INFO - HTTP Request: GET http://localhost:8080/api/list_functions "HTTP/1.1 404 Not Found"
+2025-04-14 14:25:05,545 - ollama-ghidra-bridge.ghidra - ERROR - Endpoint not found: http://localhost:8080/api/list_functions
+2025-04-14 14:25:05,545 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: list_segments with params: {'offset': '0', 'limit': '50'}
+2025-04-14 14:25:05,561 - httpx - INFO - HTTP Request: GET http://localhost:8080/api/segments?offset=0&limit=50 "HTTP/1.1 404 Not Found"
+2025-04-14 14:25:05,562 - ollama-ghidra-bridge.ghidra - ERROR - Endpoint not found: http://localhost:8080/api/segments
+2025-04-14 14:25:05,562 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: list_imports with params: {'offset': '0', 'limit': '50'}
+2025-04-14 14:25:05,581 - httpx - INFO - HTTP Request: GET http://localhost:8080/api/imports?offset=0&limit=50 "HTTP/1.1 404 Not Found"
+2025-04-14 14:25:05,582 - ollama-ghidra-bridge.ghidra - ERROR - Endpoint not found: http://localhost:8080/api/imports
+2025-04-14 14:25:05,582 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: list_exports with params: {'offset': '0', 'limit': '50'}
+2025-04-14 14:25:05,596 - httpx - INFO - HTTP Request: GET http://localhost:8080/api/exports?offset=0&limit=50 "HTTP/1.1 404 Not Found"
+2025-04-14 14:25:05,596 - ollama-ghidra-bridge.ghidra - ERROR - Endpoint not found: http://localhost:8080/api/exports
+2025-04-14 14:25:05,596 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: list_classes with params: {'offset': '0', 'limit': '50'}
+2025-04-14 14:25:05,611 - httpx - INFO - HTTP Request: GET http://localhost:8080/api/classes?offset=0&limit=50 "HTTP/1.1 404 Not Found"
+2025-04-14 14:25:05,611 - ollama-ghidra-bridge.ghidra - ERROR - Endpoint not found: http://localhost:8080/api/classes
+2025-04-14 14:25:05,611 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: list_data_items with params: {'offset': '0', 'limit': '50'}
+2025-04-14 14:25:05,627 - httpx - INFO - HTTP Request: GET http://localhost:8080/api/data?offset=0&limit=50 "HTTP/1.1 404 Not Found"
+2025-04-14 14:25:05,627 - ollama-ghidra-bridge.ghidra - ERROR - Endpoint not found: http://localhost:8080/api/data
+2025-04-14 14:25:05,627 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: search_functions_by_name with params: {'query': 'main', 'offset': '0', 'limit': '10'}
+2025-04-14 14:25:05,628 - httpx - INFO - HTTP Request: GET http://localhost:8080/api/searchFunctions?query=main&offset=0&limit=10 "HTTP/1.1 404 Not Found"
+2025-04-14 14:25:05,628 - ollama-ghidra-bridge.ghidra - ERROR - Endpoint not found: http://localhost:8080/api/searchFunctions
+2025-04-14 14:25:05,628 - ollama-ghidra-bridge - INFO - Executing GhidraMCP command: get_current_address with params: {}
+2025-04-14 14:25:05,643 - httpx - INFO - HTTP Request: GET http://localhost:8080/api/get_current_address "HTTP/1.1 404 Not Found"
+2025-04-14 14:25:05,644 - ollama-ghidra-bridge.ghidra - ERROR - Endpoint not found: http://localhost:8080/api/get_current_address

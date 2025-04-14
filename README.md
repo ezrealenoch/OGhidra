@@ -1,0 +1,148 @@
+# Ollama-GhidraMCP Bridge
+
+A Python application that bridges locally hosted AI models (via Ollama) with GhidraMCP for AI-assisted reverse engineering tasks within Ghidra.
+
+## Architecture
+
+This bridge connects the following components:
+
+- **Ollama Server**: Hosts local AI models (e.g., LLaMA 3, Mistral) accessible via REST API
+- **Bridge Application**: This Python application that serves as an intermediary
+- **GhidraMCP Server**: Exposes Ghidra's functionalities via MCP
+
+## Features
+
+- **Natural Language Queries**: Translate user queries into GhidraMCP commands
+- **Context Management**: Maintains conversation context for multi-step analyses
+- **Interactive Mode**: Command-line interface for interactive sessions
+- **Health Checks**: Verify connectivity to Ollama and GhidraMCP services
+
+## Requirements
+
+- Python 3.8+
+- Ollama server running locally or remotely
+- GhidraMCP server running within Ghidra
+
+## Installation
+
+1. Clone this repository:
+   ```bash
+   git clone https://github.com/yourusername/ollama-ghidra-bridge.git
+   cd ollama-ghidra-bridge
+   ```
+
+2. Install the required dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. Create a `.env` file by copying the example:
+   ```bash
+   cp .env.example .env
+   ```
+
+4. Edit the `.env` file to configure your Ollama and GhidraMCP settings.
+
+## Usage
+
+### Interactive Mode
+
+Run the bridge in interactive mode:
+
+```bash
+python main.py --interactive
+```
+
+Special commands:
+- Type `exit` or `quit` to exit
+- Type `health` to check connectivity to Ollama and GhidraMCP
+
+### Mock Mode
+
+If you don't have a GhidraMCP server running or want to test the bridge functionality, you can use mock mode:
+
+```bash
+python main.py --interactive --mock
+```
+
+In mock mode, the bridge simulates GhidraMCP responses without contacting the actual server.
+
+### Command Line Mode
+
+Process a single query:
+
+```bash
+echo "What functions are in this binary?" | python main.py
+```
+
+### Configuration Options
+
+You can configure the bridge through:
+
+1. Environment variables (see `.env.example`)
+2. Command line arguments:
+   ```bash
+   python main.py --ollama-url http://localhost:11434 --ghidra-url http://localhost:8080 --model llama3 --interactive
+   ```
+
+## Troubleshooting
+
+### GhidraMCP Connection Issues
+
+If you encounter 404 errors or empty responses from the GhidraMCP server:
+
+1. **Verify GhidraMCP server is running**: Make sure the GhidraMCP server is running and accessible. You can test with `curl http://localhost:8080/methods`
+
+2. **Check endpoint structure**: This bridge directly implements the same endpoint structure as the [GhidraMCP repository](https://github.com/LaurieWired/GhidraMCP/blob/main/bridge_mcp_ghidra.py).
+
+3. **Try mock mode**: Use the `--mock` flag to verify the bridge functionality without connecting to a real server.
+
+4. **Check server URL**: Ensure the server URL in your configuration is correct, including the port.
+
+### Ollama API Issues
+
+If you encounter issues with the Ollama API:
+
+1. Ensure Ollama is running: `curl http://localhost:11434`
+2. Verify the model specified exists: `ollama list`
+3. Check the model compatibility with the prompt format
+
+### JSON Parsing Errors
+
+If you see "Expecting value" or other JSON parsing errors:
+
+1. The API might be returning empty or non-JSON responses
+2. Try running with `LOG_LEVEL=DEBUG` for more detailed logs
+3. Check the API documentation to ensure proper request format
+
+## Available GhidraMCP Commands
+
+The bridge supports the following commands:
+
+- `decompile_function(address)`: Decompile a function at a given address
+- `rename_function(address, name)`: Rename a function to a specified name
+- `list_functions()`: Retrieve a list of all functions in the binary
+- `get_imports()`: List all imported functions
+- `get_exports()`: List all exported functions
+- `get_memory_map()`: Retrieve the memory layout of the binary
+- `comment_function(address, comment)`: Add comments to a function
+- `rename_variable(function_address, variable_name, new_name)`: Rename a local variable
+- `search_strings(pattern)`: Search for strings in memory
+- `get_references(address)`: Get references from/to a specific address
+
+## Example Queries
+
+- "List all functions in this binary"
+- "Decompile the function at address 0x1000"
+- "What's the memory layout of this binary?"
+- "Find all strings containing 'password'"
+- "Rename the function at 0x2000 to 'process_data'"
+
+## License
+
+[MIT License](LICENSE)
+
+## Acknowledgements
+
+- [LaurieWired/GhidraMCP](https://github.com/LaurieWired/GhidraMCP) - GhidraMCP server
+- [Ollama](https://ollama.ai/) - Local large language model hosting 
