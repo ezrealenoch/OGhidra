@@ -1,6 +1,7 @@
 # Ollama-GhidraMCP Bridge
 
 A Python application that bridges locally hosted AI models (via Ollama) with GhidraMCP for AI-assisted reverse engineering tasks within Ghidra.
+(Authors Note: It does not work very well and requires an Agentic design to power it efficiently, please help)
 
 ## Architecture
 
