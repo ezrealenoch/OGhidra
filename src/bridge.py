@@ -61,6 +61,22 @@ class Bridge:
         self.logger.info(f"Bridge initialized with Ollama at {config.ollama.base_url} and GhidraMCP at {config.ghidra.base_url}")
         self.max_agent_steps = max_agent_steps  # Maximum number of steps for agentic execution loop
         self.max_review_rounds = max_review_rounds  # Maximum number of review rounds after tool execution
+        
+        # Internal state management - track what the agent has already done
+        self.analysis_state = {
+            'functions_decompiled': set(),  # Set of function addresses that have been decompiled
+            'functions_renamed': {},        # Dict mapping original addresses to new names
+            'comments_added': {},           # Dict mapping addresses to comments
+            'functions_analyzed': set(),    # Set of functions that have been analyzed
+        }
+        
+        # Planning state
+        self.current_plan = None
+        
+        # Context summarization settings
+        self.context_summarization_threshold = self.config.context_limit * 0.8  # Summarize at 80% of limit
+        self.last_summarization_time = None
+        
         if self.include_capabilities and self.capabilities_text:
             self.logger.info("Capabilities context will be included in prompts.")
         elif self.include_capabilities:
@@ -107,6 +123,26 @@ class Bridge:
                 f"```text\n{self.capabilities_text}\n```\n---\n\n"
             )
         
+        # State information section - what the agent has already done
+        state_section = ""
+        if any(len(v) > 0 for v in self.analysis_state.values() if isinstance(v, (dict, set))):
+            state_section = "## Analysis State:\n"
+            if self.analysis_state['functions_decompiled']:
+                state_section += f"- Already decompiled functions: {', '.join(sorted(self.analysis_state['functions_decompiled']))}\n"
+            if self.analysis_state['functions_renamed']:
+                renamed = [f"{old} -> {new}" for old, new in self.analysis_state['functions_renamed'].items()]
+                state_section += f"- Already renamed functions: {', '.join(renamed)}\n"
+            if self.analysis_state['comments_added']:
+                state_section += f"- Comments have been added to: {', '.join(sorted(self.analysis_state['comments_added'].keys()))}\n"
+            if self.analysis_state['functions_analyzed']:
+                state_section += f"- Already analyzed functions: {', '.join(sorted(self.analysis_state['functions_analyzed']))}\n"
+            state_section += "---\n\n"
+            
+        # Current plan section
+        plan_section = ""
+        if self.current_plan:
+            plan_section = f"## Current Plan:\n{self.current_plan}\n---\n\n"
+            
         # Conversation history section
         history_items = []
         for item in self.context[-self.config.context_limit:]:
@@ -115,6 +151,8 @@ class Bridge:
                     "Tool Call: " if item["role"] == "tool_call" else \
                     "Tool Result: " if item["role"] == "tool_result" else \
                     "AI Review: " if item["role"] == "review" else \
+                    "Plan: " if item["role"] == "plan" else \
+                    "Summary: " if item["role"] == "summary" else \
                     f"{item['role'].capitalize()}: "
             history_items.append(f"{prefix}{item['content']}")
         
@@ -130,17 +168,24 @@ class Bridge:
             "4. Provide analysis along with your tool calls\n"
             "5. Your response should be clear and concise\n"
             "6. When you have completed your analysis and are ready to provide a final answer, include \"FINAL RESPONSE:\" followed by your complete answer\n"
+            "7. If you're unsure what to do or the request is ambiguous, ask a clarifying question instead of guessing\n"
+            "8. If you identify useful combinations of tools for common tasks, you can make a `SUGGESTION:` for future improvements\n"
             "---\n\n"
         )
         
         # Create the full prompt
-        full_prompt = capabilities_section + history_section + instructions_section
+        full_prompt = capabilities_section + state_section + plan_section + history_section + instructions_section
         
-        # Add final response request only if last message was from user
+        # Add final response request based on the last message
         if self.context and self.context[-1]["role"] == "user":
-            full_prompt += "## Your Response:\n"
+            if not self.current_plan:
+                full_prompt += "## Planning Phase:\nBefore executing tools, create a detailed plan outlining the steps you'll take to address the user's request.\n"
+            else:
+                full_prompt += "## Your Response:\n"
         elif self.context and self.context[-1]["role"] == "review":
             full_prompt += "## Continue Your Analysis:\nBased on the review feedback, continue your analysis or finalize your response.\n"
+        elif self.context and self.context[-1]["role"] == "planning":
+            full_prompt += "## Execute Plan:\nFollow the plan you created to address the user's request, executing tools as needed.\n"
             
         return full_prompt
     
@@ -158,12 +203,52 @@ class Bridge:
         # Add the query to context
         self.context.append({"role": "user", "content": query})
         
+        # Check if we need to summarize context before processing
+        if self._should_summarize_context():
+            self._summarize_context()
+        
+        # Reset plan for new query
+        self.current_plan = None
+        
         # Initialize the final response variable
         final_response = ""
         
-        # Primary agentic execution loop - allows multiple steps of reasoning with tools
+        # 1. Planning Phase - Get the AI to create a plan before executing tools
+        planning_prompt = self._build_structured_prompt()
+        self.logger.info("Starting planning phase")
+        
+        try:
+            # Get AI to create a plan
+            plan_response = self.ollama.generate(planning_prompt, self.config.ollama.default_system_prompt)
+            self.logger.info(f"Received planning response: {plan_response[:100]}...")
+            
+            # Check if this is a clarification request
+            if self._check_for_clarification_request(plan_response):
+                self.logger.info("AI is requesting clarification from user")
+                return plan_response  # Return the question directly to the user
+                
+            # Extract any tool suggestions
+            plan_response, suggestions = self._extract_suggestions(plan_response)
+            
+            # Store the plan in the context and the state
+            self.current_plan = plan_response
+            self.context.append({"role": "plan", "content": plan_response})
+            self.logger.info("Planning phase completed")
+            
+        except Exception as e:
+            error_msg = f"Error in planning phase: {str(e)}"
+            self.logger.error(error_msg)
+            # Continue without a plan if it fails
+            self.logger.info("Continuing without a plan due to error")
+            
+        # 2. Primary agentic execution loop - allows multiple steps of reasoning with tools
+        self.logger.info("Starting tool execution phase")
         for step in range(self.max_agent_steps):
-            # Build the structured prompt
+            # Check if we should summarize context
+            if self._should_summarize_context():
+                self._summarize_context()
+                
+            # Build the structured prompt with the current state and plan
             prompt = self._build_structured_prompt()
             
             # Send to Ollama
@@ -173,6 +258,14 @@ class Bridge:
                 # Get AI response
                 ai_response = self.ollama.generate(prompt, self.config.ollama.default_system_prompt)
                 self.logger.info(f"Received response from Ollama: {ai_response[:100]}...")
+                
+                # Check if this is a clarification request
+                if self._check_for_clarification_request(ai_response):
+                    self.logger.info("AI is requesting clarification from user")
+                    return ai_response  # Return the question directly to the user
+                    
+                # Extract any tool suggestions
+                ai_response, suggestions = self._extract_suggestions(ai_response)
                 
                 # Parse commands from the response
                 commands = CommandParser.extract_commands(ai_response)
@@ -221,12 +314,16 @@ class Bridge:
                 final_response = f"Sorry, I encountered an error: {str(e)}"
                 break
         
-        # Secondary review and reasoning loop - evaluates completeness of response
+        # 3. Secondary review and reasoning loop - evaluates completeness of response
         self.logger.info("Starting review and reasoning phase")
         review_step = 0
         has_final_response = False
         
         while review_step < self.max_review_rounds and not has_final_response:
+            # Check if we should summarize context
+            if self._should_summarize_context():
+                self._summarize_context()
+                
             # Check if current final_response already contains "FINAL RESPONSE"
             if "FINAL RESPONSE:" in final_response:
                 has_final_response = True
@@ -255,6 +352,14 @@ class Bridge:
                 # Get AI's review response
                 ai_review_response = self.ollama.generate(prompt, self.config.ollama.default_system_prompt)
                 self.logger.info(f"Received review response: {ai_review_response[:100]}...")
+                
+                # Check if this is a clarification request
+                if self._check_for_clarification_request(ai_review_response):
+                    self.logger.info("AI is requesting clarification from user during review")
+                    return ai_review_response  # Return the question directly to the user
+                    
+                # Extract any tool suggestions
+                ai_review_response, suggestions = self._extract_suggestions(ai_review_response)
                 
                 # Clean the response and update
                 clean_review = self._remove_commands(ai_review_response)
@@ -320,14 +425,14 @@ class Bridge:
     
     def _execute_single_command(self, command_name: str, params: Dict[str, Any]) -> str:
         """
-        Execute a single GhidraMCP command with enhanced error handling.
+        Execute a single GhidraMCP command with enhanced error handling and automatic recovery.
         
         Args:
             command_name: Name of the GhidraMCP command
             params: Command parameters
             
         Returns:
-            Result or error string
+            Result or error string with suggestions
         """
         try:
             # Check if the command is available in the GhidraMCP client
@@ -340,18 +445,15 @@ class Bridge:
                 
                 # Check if there was an error
                 if isinstance(cmd_result, dict) and "error" in cmd_result:
-                    error_msg = CommandParser.get_enhanced_error_message(
-                        command_name, params, cmd_result.get("error", "Unknown error")
-                    )
-                    self.logger.error(error_msg)
+                    error_msg = self._handle_command_error(command_name, params, cmd_result.get("error", "Unknown error"))
                     return error_msg
                 elif isinstance(cmd_result, str) and ("Failed" in cmd_result or "Error" in cmd_result):
-                    error_msg = CommandParser.get_enhanced_error_message(
-                        command_name, params, cmd_result
-                    )
-                    self.logger.error(error_msg)
+                    error_msg = self._handle_command_error(command_name, params, cmd_result)
                     return error_msg
                 else:
+                    # Success! Update the analysis state
+                    self._update_analysis_state(command_name, params, str(cmd_result))
+                    
                     # Format the command result
                     if isinstance(cmd_result, (list, dict)):
                         formatted_result = f"RESULT: {json.dumps(cmd_result, indent=2)}"
@@ -363,11 +465,67 @@ class Bridge:
                 self.logger.error(error_msg)
                 return error_msg
         except Exception as e:
-            error_msg = CommandParser.get_enhanced_error_message(
-                command_name, params, str(e)
-            )
-            self.logger.error(error_msg)
+            error_msg = self._handle_command_error(command_name, params, str(e))
             return error_msg
+            
+    def _handle_command_error(self, command_name: str, params: Dict[str, Any], error_message: str) -> str:
+        """
+        Handle command errors with recovery actions and enhanced error messages.
+        
+        Args:
+            command_name: The command that was executed
+            params: The parameters that were used
+            error_message: The original error message
+            
+        Returns:
+            Enhanced error message with recovery suggestions
+        """
+        self.logger.error(f"Error executing {command_name}: {error_message}")
+        
+        # Attempt recovery action based on the command and error
+        recovery_result = None
+        recovery_performed = False
+        suggestion = ""
+        
+        # Function not found errors
+        if "not found" in error_message.lower() or "does not exist" in error_message.lower():
+            if command_name in ["rename_function_by_address", "decompile_function_by_address", "disassemble_function"]:
+                # Try to get a list of functions to verify if the address exists
+                self.logger.info(f"Attempting recovery by listing available functions")
+                try:
+                    functions = self.ghidra.list_functions()
+                    if isinstance(functions, list) and functions:
+                        recovery_result = f"Available functions (sample): {', '.join(functions[:10])}"
+                        recovery_performed = True
+                        suggestion = "Use list_functions() to see all available functions and verify addresses."
+                except Exception as e:
+                    self.logger.error(f"Recovery attempt failed: {str(e)}")
+                    
+        # Address format errors
+        if "address" in error_message.lower() and "invalid" in error_message.lower():
+            if "function_address" in params:
+                # Attempt to format the address correctly
+                addr = params.get("function_address", "")
+                if addr.startswith("FUN_"):
+                    suggestion = f"Function addresses should not include 'FUN_' prefix. Try '{addr[4:]}' instead."
+                elif not addr.startswith("0x") and all(c in "0123456789abcdefABCDEF" for c in addr):
+                    suggestion = f"Try formatting the address with '0x' prefix: '0x{addr}'"
+                    
+        # Network or connection errors
+        if "connection" in error_message.lower() or "timeout" in error_message.lower():
+            suggestion = "Check if Ghidra and the GhidraMCP server are running and accessible."
+            
+        # Get enhanced error from CommandParser
+        enhanced_error = CommandParser.get_enhanced_error_message(command_name, params, error_message)
+        
+        # Build the final error message
+        final_error = enhanced_error
+        if recovery_performed and recovery_result:
+            final_error += f"\n\nRecovery information: {recovery_result}"
+        if suggestion:
+            final_error += f"\n\nSuggestion: {suggestion}"
+            
+        return final_error
     
     def _parse_and_execute_commands(self, response: str) -> str:
         """
@@ -437,6 +595,153 @@ class Bridge:
             "ollama": self.ollama.health_check(),
             "ghidra": self.ghidra.health_check()
         }
+
+    def _should_summarize_context(self) -> bool:
+        """
+        Determine if the context should be summarized based on length.
+        
+        Returns:
+            True if context should be summarized, False otherwise
+        """
+        return len(self.context) >= self.context_summarization_threshold
+    
+    def _summarize_context(self) -> None:
+        """
+        Summarize the conversation context to preserve key information while reducing length.
+        """
+        if len(self.context) <= 5:  # Don't summarize very short contexts
+            return
+            
+        # Create a prompt for the LLM to summarize the context
+        summarization_instruction = (
+            "Summarize the key points, findings, and outstanding tasks from this conversation history. "
+            "Preserve important technical details, especially addresses and function names. "
+            "Format the summary in bullet points with the most important information first."
+        )
+        
+        # Build a prompt with just the context to summarize
+        context_items = []
+        # Get items except the last few (keep recent items unsummarized)
+        items_to_summarize = self.context[:-5]
+        for item in items_to_summarize:
+            prefix = "User: " if item["role"] == "user" else \
+                    "Assistant: " if item["role"] == "assistant" else \
+                    "Tool Call: " if item["role"] == "tool_call" else \
+                    "Tool Result: " if item["role"] == "tool_result" else \
+                    "AI Review: " if item["role"] == "review" else \
+                    "Plan: " if item["role"] == "plan" else \
+                    "Summary: " if item["role"] == "summary" else \
+                    f"{item['role'].capitalize()}: "
+            context_items.append(f"{prefix}{item['content']}")
+        
+        context_text = "\n".join(context_items)
+        summarization_prompt = f"{context_text}\n\n{summarization_instruction}"
+        
+        try:
+            # Ask the LLM to summarize
+            self.logger.info("Summarizing conversation context")
+            summary = self.ollama.generate(summarization_prompt, "You are a helpful assistant tasked with summarizing technical conversations about reverse engineering.")
+            
+            # Replace the old context items with the new summary
+            # Keep all special entries (plans, etc.) but remove regular conversation
+            kept_items = [item for item in self.context[-5:]]  # Keep the most recent items
+            special_items = [item for item in items_to_summarize if item["role"] not in ["user", "assistant", "tool_call", "tool_result"]]
+            
+            # Create a new context with the summary as the first item
+            new_context = [{"role": "summary", "content": summary}]
+            new_context.extend(special_items)
+            new_context.extend(kept_items)
+            
+            self.context = new_context
+            self.logger.info(f"Context summarized, reduced from {len(items_to_summarize) + 5} to {len(new_context)} items")
+            
+        except Exception as e:
+            self.logger.error(f"Error summarizing context: {str(e)}")
+            # If summarization fails, fall back to simple truncation
+            self.context = self.context[-self.config.context_limit:]
+            
+    def _update_analysis_state(self, command_name: str, params: Dict[str, Any], result: str) -> None:
+        """
+        Update the internal analysis state based on the executed command and result.
+        
+        Args:
+            command_name: The command that was executed
+            params: The parameters that were used
+            result: The result of the command
+        """
+        # Only update state if command was successful
+        if "ERROR" in result or "Failed" in result:
+            return
+            
+        # Track decompiled functions
+        if command_name == "decompile_function" and "name" in params:
+            self.analysis_state["functions_analyzed"].add(params["name"])
+            
+        elif command_name == "decompile_function_by_address" and "address" in params:
+            address = params["address"]
+            self.analysis_state["functions_decompiled"].add(address)
+            self.analysis_state["functions_analyzed"].add(address)
+            
+        # Track renamed functions
+        elif command_name == "rename_function" and "old_name" in params and "new_name" in params:
+            self.analysis_state["functions_renamed"][params["old_name"]] = params["new_name"]
+            
+        elif command_name == "rename_function_by_address" and "function_address" in params and "new_name" in params:
+            self.analysis_state["functions_renamed"][params["function_address"]] = params["new_name"]
+            
+        # Track comments added
+        elif command_name in ["set_decompiler_comment", "set_disassembly_comment"] and "address" in params and "comment" in params:
+            self.analysis_state["comments_added"][params["address"]] = params["comment"]
+    
+    def _check_for_clarification_request(self, response: str) -> bool:
+        """
+        Check if the AI's response is a request for clarification from the user.
+        
+        Args:
+            response: The AI's response text
+            
+        Returns:
+            True if the response is a clarification request, False otherwise
+        """
+        # Simple heuristic: look for question marks near the end of the response
+        # and check if the response doesn't contain any tool calls
+        if "EXECUTE:" not in response and "?" in response:
+            last_paragraph = response.split("\n\n")[-1].strip()
+            # If the last paragraph ends with a question mark, it's likely a clarification request
+            if last_paragraph.endswith("?"):
+                # Additional check: make sure it's not just showing code examples with question marks
+                if not ("`" in last_paragraph or "```" in last_paragraph):
+                    return True
+        return False
+        
+    def _extract_suggestions(self, response: str) -> Tuple[str, List[str]]:
+        """
+        Extract tool improvement suggestions from the AI's response.
+        
+        Args:
+            response: The AI's response text
+            
+        Returns:
+            Tuple of (cleaned_response, list_of_suggestions)
+        """
+        suggestions = []
+        cleaned_lines = []
+        
+        # Simple parsing: look for lines starting with "SUGGESTION:"
+        for line in response.split("\n"):
+            if line.strip().startswith("SUGGESTION:"):
+                suggestion = line.strip()[len("SUGGESTION:"):].strip()
+                suggestions.append(suggestion)
+            else:
+                cleaned_lines.append(line)
+                
+        # If suggestions were found, log them
+        if suggestions:
+            self.logger.info(f"Found {len(suggestions)} tool improvement suggestions")
+            for suggestion in suggestions:
+                self.logger.info(f"Tool suggestion: {suggestion}")
+                
+        return "\n".join(cleaned_lines), suggestions
 
 def main():
     """Main entry point for the bridge application."""
