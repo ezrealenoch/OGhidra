@@ -40,10 +40,51 @@ class CommandParser:
             # Parse parameters
             params = CommandParser._parse_parameters(params_text)
             
+            # Validate and transform parameters for specific commands
+            params = CommandParser._validate_and_transform_params(command_name, params)
+            
             commands.append((command_name, params))
             logger.debug(f"Extracted command: {command_name} with params: {params}")
             
         return commands
+    
+    @staticmethod
+    def _validate_and_transform_params(command_name: str, params: Dict[str, str]) -> Dict[str, str]:
+        """
+        Validate and potentially transform parameters for specific commands.
+        This helps catch common errors before they reach the GhidraMCP client.
+        
+        Args:
+            command_name: The name of the command
+            params: The parsed parameters
+            
+        Returns:
+            Validated and potentially transformed parameters
+        """
+        # Make a copy to avoid modifying the original
+        validated_params = params.copy()
+        
+        # For rename_function_by_address, check if function_address is a function name
+        if command_name == "rename_function_by_address" and "function_address" in validated_params:
+            addr = validated_params["function_address"]
+            
+            # If it starts with "FUN_" and the rest is hex, extract just the hex part
+            if addr.startswith("FUN_") and all(c in "0123456789abcdefABCDEF" for c in addr[4:]):
+                # Extract just the address portion
+                validated_params["function_address"] = addr[4:]
+                logger.info(f"Transformed function address from '{addr}' to '{addr[4:]}'")
+        
+        # Handle 0x prefix in addresses for various functions
+        address_param_names = ["address", "function_address"]
+        for param_name in address_param_names:
+            if param_name in validated_params:
+                addr = validated_params[param_name]
+                # If it starts with "0x", remove it
+                if addr.startswith("0x") or addr.startswith("0X"):
+                    validated_params[param_name] = addr[2:]
+                    logger.info(f"Transformed address from '{addr}' to '{addr[2:]}'")
+        
+        return validated_params
     
     @staticmethod
     def _parse_parameters(params_text: str) -> Dict[str, str]:
@@ -131,4 +172,64 @@ class CommandParser:
             The response with the command replaced by its result
         """
         start, end = cmd_match.span()
-        return response[:start] + result + response[end:] 
+        return response[:start] + result + response[end:]
+    
+    @staticmethod
+    def remove_commands(text: str) -> str:
+        """
+        Remove EXECUTE command blocks from text to get the clean response.
+        
+        Args:
+            text: The text containing EXECUTE blocks
+            
+        Returns:
+            Clean text with EXECUTE blocks removed
+        """
+        # Simple pattern to remove EXECUTE: command() blocks
+        clean_text = re.sub(r'EXECUTE:\s*[\w_]+\([^)]*\)', '', text)
+        
+        # Clean up any resulting double newlines
+        clean_text = re.sub(r'\n\s*\n\s*\n', '\n\n', clean_text)
+        
+        return clean_text.strip()
+    
+    @staticmethod
+    def get_enhanced_error_message(command_name: str, params: Dict[str, str], error: str) -> str:
+        """
+        Generate an enhanced error message with specific guidance based on the command and error.
+        
+        Args:
+            command_name: The command that was attempted
+            params: The parameters that were used
+            error: The original error message
+            
+        Returns:
+            Enhanced error message with guidance
+        """
+        # Default to the original error
+        enhanced_error = f"ERROR: {error}"
+        
+        # Add specific guidance based on the command and parameters
+        if command_name == "rename_function_by_address":
+            addr = params.get("function_address", "")
+            if addr.startswith("FUN_"):
+                return (
+                    f"ERROR: Invalid parameter 'function_address'. Expected numerical address (e.g., '{addr[4:]}'), "
+                    f"but received function name ('{addr}'). "
+                    f"Use the correct address or the 'rename_function' tool if you only have the name."
+                )
+            elif "Failed to rename function" in error:
+                return (
+                    f"ERROR: Failed to rename function at address '{addr}'. "
+                    f"This could be because the function doesn't exist at that address, "
+                    f"or the new name is invalid or already in use. "
+                    f"Try using get_function_by_address(address='{addr}') to verify the function exists."
+                )
+        elif command_name.startswith("decompile_"):
+            return (
+                f"ERROR: {error}. "
+                f"The function may not exist or may not be a valid target for decompilation. "
+                f"Try list_functions() to see available functions."
+            )
+            
+        return enhanced_error 

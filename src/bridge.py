@@ -10,8 +10,9 @@ import argparse
 import json
 import logging
 import sys
-import os  # Added import
-from typing import Dict, Any, List, Optional
+import os
+import re  # Added for pattern matching in enhanced error feedback
+from typing import Dict, Any, List, Optional, Tuple, Union
 
 from src.config import BridgeConfig
 from src.ollama_client import OllamaClient
@@ -53,9 +54,10 @@ class Bridge:
         self.ollama = OllamaClient(config.ollama)
         self.ghidra = GhidraMCPClient(config.ghidra)
         self.context = []  # Store conversation context
-        self.include_capabilities = include_capabilities  # Store the flag
-        self.capabilities_text = self._load_capabilities_text()  # Load capabilities text on init
+        self.include_capabilities = include_capabilities
+        self.capabilities_text = self._load_capabilities_text()
         self.logger.info(f"Bridge initialized with Ollama at {config.ollama.base_url} and GhidraMCP at {config.ghidra.base_url}")
+        self.max_agent_steps = 5  # Maximum number of steps for agentic execution loop
         if self.include_capabilities and self.capabilities_text:
             self.logger.info("Capabilities context will be included in prompts.")
         elif self.include_capabilities:
@@ -85,9 +87,59 @@ class Bridge:
             self.logger.error(f"Error reading capabilities file '{capabilities_file}': {str(e)}")
             return None
 
+    def _build_structured_prompt(self) -> str:
+        """
+        Build a structured prompt with clear sections for capabilities, history, and current task.
+        
+        Returns:
+            A structured prompt string with labeled sections
+        """
+        # Capabilities section
+        capabilities_section = ""
+        if self.include_capabilities and self.capabilities_text:
+            capabilities_section = (
+                f"## Available Tools:\n"
+                f"You have access to the following Ghidra interaction tools. "
+                f"Use the `EXECUTE: tool_name(param1=value1, ...)` format to call them.\n"
+                f"```text\n{self.capabilities_text}\n```\n---\n\n"
+            )
+        
+        # Conversation history section
+        history_items = []
+        for item in self.context[-self.config.context_limit:]:
+            prefix = "User: " if item["role"] == "user" else \
+                    "Assistant: " if item["role"] == "assistant" else \
+                    "Tool Call: " if item["role"] == "tool_call" else \
+                    "Tool Result: " if item["role"] == "tool_result" else \
+                    f"{item['role'].capitalize()}: "
+            history_items.append(f"{prefix}{item['content']}")
+        
+        history_section = "## Conversation History:\n" + "\n".join(history_items) + "\n---\n\n"
+        
+        # Instructions section - always included
+        instructions_section = (
+            "## Instructions:\n"
+            "1. Analyze the user request carefully based on available context\n"
+            "2. Use tools by writing `EXECUTE: tool_name(param1=value1, ...)` for each tool call\n"
+            "3. IMPORTANT FOR RENAME OPERATIONS: When using rename_function_by_address, "
+            "the function_address parameter must be the numerical address (e.g., '1800011a8'), not the function name (e.g., 'FUN_1800011a8')\n"
+            "4. Provide analysis along with your tool calls\n"
+            "5. Your response should be clear and concise\n---\n\n"
+        )
+        
+        # Create the full prompt
+        full_prompt = capabilities_section + history_section + instructions_section
+        
+        # Add final response request only if last message was from user
+        if self.context and self.context[-1]["role"] == "user":
+            full_prompt += "## Your Response:\n"
+        
+        return full_prompt
+    
     def process_query(self, query: str) -> str:
         """
-        Process a natural language query through the AI and execute commands on GhidraMCP.
+        Process a natural language query through the AI and execute commands on GhidraMCP,
+        with optional multi-step agentic reasoning.
         
         Args:
             query: The user's query
@@ -98,40 +150,133 @@ class Bridge:
         # Add the query to context
         self.context.append({"role": "user", "content": query})
         
-        # Construct the base prompt from context
-        context_prompt = "\n\n".join([
-            f"{'User' if item['role'] == 'user' else 'Assistant'}: {item['content']}" 
-            for item in self.context[-self.config.context_limit:]  # Use context_limit from config
-        ])
+        # Initialize the final response variable
+        final_response = ""
         
-        # Prepend capabilities if flag is set and text loaded
-        capabilities_prefix = ""
-        if self.include_capabilities and self.capabilities_text:
-            capabilities_prefix = f"Context: Available Ghidra interaction tools and their functions:\n```\n{self.capabilities_text}\n```\n\n---\n\n"
-
-        # Combine capabilities prefix, context, and final instruction
-        full_prompt = capabilities_prefix + context_prompt 
-        full_prompt += "\n\nPlease analyze the request based *only* on the provided context and available tools. Execute the necessary tool calls directly if appropriate."
-
-        # Send to Ollama
-        self.logger.info(f"Sending query to Ollama: {query[:100]}...")
+        # Agentic execution loop - allows multiple steps of reasoning
+        for step in range(self.max_agent_steps):
+            # Build the structured prompt
+            prompt = self._build_structured_prompt()
+            
+            # Send to Ollama
+            self.logger.info(f"Step {step+1}/{self.max_agent_steps}: Sending query to Ollama")
+            
+            try:
+                # Get AI response
+                ai_response = self.ollama.generate(prompt, self.config.ollama.default_system_prompt)
+                self.logger.info(f"Received response from Ollama: {ai_response[:100]}...")
+                
+                # Parse commands from the response
+                commands = CommandParser.extract_commands(ai_response)
+                
+                # Clean the response text (remove EXECUTE blocks)
+                clean_response = self._remove_commands(ai_response)
+                
+                # Add the clean response to context
+                if clean_response.strip():
+                    self.context.append({"role": "assistant", "content": clean_response.strip()})
+                    final_response = clean_response.strip()
+                
+                # If no commands found, we're done
+                if not commands:
+                    self.logger.info("No commands found in AI response, ending agent loop")
+                    break
+                
+                # Execute each command and add to context
+                all_results = []
+                for cmd_name, cmd_params in commands:
+                    # Add tool call to context
+                    params_str = ", ".join([f"{k}=\"{v}\"" for k, v in cmd_params.items()])
+                    tool_call = f"EXECUTE: {cmd_name}({params_str})"
+                    self.context.append({"role": "tool_call", "content": tool_call})
+                    
+                    # Execute the command
+                    result = self._execute_single_command(cmd_name, cmd_params)
+                    all_results.append((tool_call, result))
+                    
+                    # Add result to context
+                    self.context.append({"role": "tool_result", "content": result})
+                
+                # Update final response with results
+                final_response = clean_response + "\n\n" + "\n".join([result for _, result in all_results])
+                
+                # Check if any command failed - if so, let the AI try again in the next step
+                any_errors = any(["ERROR" in result or "Failed" in result for _, result in all_results])
+                if not any_errors:
+                    # If all commands succeeded, we can break the loop
+                    self.logger.info("All commands executed successfully, ending agent loop")
+                    break
+                
+            except Exception as e:
+                error_msg = f"Error in agent step {step+1}: {str(e)}"
+                self.logger.error(error_msg)
+                final_response = f"Sorry, I encountered an error: {str(e)}"
+                break
         
+        return final_response
+    
+    def _remove_commands(self, text: str) -> str:
+        """
+        Remove EXECUTE command blocks from text to get the clean response.
+        
+        Args:
+            text: The text containing EXECUTE blocks
+            
+        Returns:
+            Clean text with EXECUTE blocks removed
+        """
+        return CommandParser.remove_commands(text)
+    
+    def _execute_single_command(self, command_name: str, params: Dict[str, Any]) -> str:
+        """
+        Execute a single GhidraMCP command with enhanced error handling.
+        
+        Args:
+            command_name: Name of the GhidraMCP command
+            params: Command parameters
+            
+        Returns:
+            Result or error string
+        """
         try:
-            # Use the potentially modified full_prompt
-            ai_response = self.ollama.generate(full_prompt, self.config.ollama.default_system_prompt)
-            self.logger.info(f"Received response from Ollama: {ai_response[:100]}...")
-            
-            # Parse and execute commands
-            result = self._parse_and_execute_commands(ai_response)
-            
-            # Add the processed response to context
-            self.context.append({"role": "assistant", "content": result})
-            
-            return result
+            # Check if the command is available in the GhidraMCP client
+            if hasattr(self.ghidra, command_name):
+                self.logger.info(f"Executing GhidraMCP command: {command_name} with params: {params}")
+                
+                # Call the method on the GhidraMCP client
+                cmd_method = getattr(self.ghidra, command_name)
+                cmd_result = cmd_method(**params)
+                
+                # Check if there was an error
+                if isinstance(cmd_result, dict) and "error" in cmd_result:
+                    error_msg = CommandParser.get_enhanced_error_message(
+                        command_name, params, cmd_result.get("error", "Unknown error")
+                    )
+                    self.logger.error(error_msg)
+                    return error_msg
+                elif isinstance(cmd_result, str) and ("Failed" in cmd_result or "Error" in cmd_result):
+                    error_msg = CommandParser.get_enhanced_error_message(
+                        command_name, params, cmd_result
+                    )
+                    self.logger.error(error_msg)
+                    return error_msg
+                else:
+                    # Format the command result
+                    if isinstance(cmd_result, (list, dict)):
+                        formatted_result = f"RESULT: {json.dumps(cmd_result, indent=2)}"
+                    else:
+                        formatted_result = f"RESULT: {cmd_result}"
+                    return formatted_result
+            else:
+                error_msg = f"ERROR: Unknown command '{command_name}'"
+                self.logger.error(error_msg)
+                return error_msg
         except Exception as e:
-            error_msg = f"Error processing query: {str(e)}"
+            error_msg = CommandParser.get_enhanced_error_message(
+                command_name, params, str(e)
+            )
             self.logger.error(error_msg)
-            return f"Sorry, I encountered an error while processing your query: {str(e)}"
+            return error_msg
     
     def _parse_and_execute_commands(self, response: str) -> str:
         """
@@ -211,7 +356,10 @@ def main():
     parser.add_argument("--interactive", action="store_true", help="Run in interactive mode")
     parser.add_argument("--health-check", action="store_true", help="Check health of services and exit")
     parser.add_argument("--mock", action="store_true", help="Run in mock mode (no GhidraMCP server needed)")
-    parser.add_argument("--include-capabilities", action="store_true", help="Include capabilities context from ai_ghidra_capabilities.txt in prompts")
+    parser.add_argument("--include-capabilities", action="store_true", 
+                        help="Include capabilities context from ai_ghidra_capabilities.txt in prompts")
+    parser.add_argument("--max-steps", type=int, default=5, 
+                        help="Maximum number of steps for agentic execution loop (default: 5)")
     args = parser.parse_args()
     
     # Load config from environment variables
@@ -231,6 +379,10 @@ def main():
     # Pass the flag to the Bridge constructor
     bridge = Bridge(config, include_capabilities=args.include_capabilities)
     
+    # Set the max agent steps if provided
+    if args.max_steps:
+        bridge.max_agent_steps = args.max_steps
+    
     if args.health_check:
         status = bridge.health_check()
         print(f"Ollama Health: {'OK' if status['ollama'] else 'FAIL'}")
@@ -240,6 +392,8 @@ def main():
     if args.interactive:
         print("Ollama-GhidraMCP Bridge (Interactive Mode)")
         print(f"Using model: {config.ollama.model}")
+        print(f"Capabilities included: {'Yes' if args.include_capabilities else 'No'}")
+        print(f"Agent steps: {bridge.max_agent_steps}")
         print("Type 'exit' or 'quit' to exit")
         
         while True:
