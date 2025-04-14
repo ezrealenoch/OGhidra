@@ -41,13 +41,15 @@ def setup_logging(config):
 class Bridge:
     """Main bridge class that connects Ollama with GhidraMCP."""
     
-    def __init__(self, config: BridgeConfig, include_capabilities: bool = False):
+    def __init__(self, config: BridgeConfig, include_capabilities: bool = False, max_agent_steps: int = 5, max_review_rounds: int = 3):
         """
         Initialize the bridge.
         
         Args:
             config: BridgeConfig object with configuration settings
             include_capabilities: Flag to include capabilities in prompt
+            max_agent_steps: Maximum number of steps for agentic execution loop
+            max_review_rounds: Maximum number of review rounds after tool execution
         """
         self.config = config
         self.logger = setup_logging(config)
@@ -57,7 +59,8 @@ class Bridge:
         self.include_capabilities = include_capabilities
         self.capabilities_text = self._load_capabilities_text()
         self.logger.info(f"Bridge initialized with Ollama at {config.ollama.base_url} and GhidraMCP at {config.ghidra.base_url}")
-        self.max_agent_steps = 5  # Maximum number of steps for agentic execution loop
+        self.max_agent_steps = max_agent_steps  # Maximum number of steps for agentic execution loop
+        self.max_review_rounds = max_review_rounds  # Maximum number of review rounds after tool execution
         if self.include_capabilities and self.capabilities_text:
             self.logger.info("Capabilities context will be included in prompts.")
         elif self.include_capabilities:
@@ -111,6 +114,7 @@ class Bridge:
                     "Assistant: " if item["role"] == "assistant" else \
                     "Tool Call: " if item["role"] == "tool_call" else \
                     "Tool Result: " if item["role"] == "tool_result" else \
+                    "AI Review: " if item["role"] == "review" else \
                     f"{item['role'].capitalize()}: "
             history_items.append(f"{prefix}{item['content']}")
         
@@ -124,7 +128,9 @@ class Bridge:
             "3. IMPORTANT FOR RENAME OPERATIONS: When using rename_function_by_address, "
             "the function_address parameter must be the numerical address (e.g., '1800011a8'), not the function name (e.g., 'FUN_1800011a8')\n"
             "4. Provide analysis along with your tool calls\n"
-            "5. Your response should be clear and concise\n---\n\n"
+            "5. Your response should be clear and concise\n"
+            "6. When you have completed your analysis and are ready to provide a final answer, include \"FINAL RESPONSE:\" followed by your complete answer\n"
+            "---\n\n"
         )
         
         # Create the full prompt
@@ -133,7 +139,9 @@ class Bridge:
         # Add final response request only if last message was from user
         if self.context and self.context[-1]["role"] == "user":
             full_prompt += "## Your Response:\n"
-        
+        elif self.context and self.context[-1]["role"] == "review":
+            full_prompt += "## Continue Your Analysis:\nBased on the review feedback, continue your analysis or finalize your response.\n"
+            
         return full_prompt
     
     def process_query(self, query: str) -> str:
@@ -153,7 +161,7 @@ class Bridge:
         # Initialize the final response variable
         final_response = ""
         
-        # Agentic execution loop - allows multiple steps of reasoning
+        # Primary agentic execution loop - allows multiple steps of reasoning with tools
         for step in range(self.max_agent_steps):
             # Build the structured prompt
             prompt = self._build_structured_prompt()
@@ -177,9 +185,9 @@ class Bridge:
                     self.context.append({"role": "assistant", "content": clean_response.strip()})
                     final_response = clean_response.strip()
                 
-                # If no commands found, we're done
+                # If no commands found, we're done with the tool execution phase
                 if not commands:
-                    self.logger.info("No commands found in AI response, ending agent loop")
+                    self.logger.info("No commands found in AI response, ending tool execution loop")
                     break
                 
                 # Execute each command and add to context
@@ -204,7 +212,7 @@ class Bridge:
                 any_errors = any(["ERROR" in result or "Failed" in result for _, result in all_results])
                 if not any_errors:
                     # If all commands succeeded, we can break the loop
-                    self.logger.info("All commands executed successfully, ending agent loop")
+                    self.logger.info("All commands executed successfully, ending tool execution loop")
                     break
                 
             except Exception as e:
@@ -213,6 +221,89 @@ class Bridge:
                 final_response = f"Sorry, I encountered an error: {str(e)}"
                 break
         
+        # Secondary review and reasoning loop - evaluates completeness of response
+        self.logger.info("Starting review and reasoning phase")
+        review_step = 0
+        has_final_response = False
+        
+        while review_step < self.max_review_rounds and not has_final_response:
+            # Check if current final_response already contains "FINAL RESPONSE"
+            if "FINAL RESPONSE:" in final_response:
+                has_final_response = True
+                self.logger.info("Found 'FINAL RESPONSE' marker, ending review loop")
+                # Extract the part after "FINAL RESPONSE:"
+                final_parts = final_response.split("FINAL RESPONSE:", 1)
+                if len(final_parts) > 1:
+                    final_response = final_parts[1].strip()
+                break
+                
+            # Add a review prompt to encourage finalizing the response
+            review_prompt = (
+                f"Review your analysis so far. Have you completed the task? "
+                f"If not, what additional information or analysis is needed? "
+                f"If yes, provide a complete and comprehensive final answer prefixed with 'FINAL RESPONSE:'"
+            )
+            self.context.append({"role": "review", "content": review_prompt})
+            
+            # Build a new prompt with the review context
+            prompt = self._build_structured_prompt()
+            
+            # Send to Ollama for review
+            self.logger.info(f"Review step {review_step+1}/{self.max_review_rounds}: Asking AI to review response")
+            
+            try:
+                # Get AI's review response
+                ai_review_response = self.ollama.generate(prompt, self.config.ollama.default_system_prompt)
+                self.logger.info(f"Received review response: {ai_review_response[:100]}...")
+                
+                # Clean the response and update
+                clean_review = self._remove_commands(ai_review_response)
+                if clean_review.strip():
+                    self.context.append({"role": "assistant", "content": clean_review.strip()})
+                    final_response = clean_review.strip()
+                    
+                    # Check if this response has the final marker
+                    if "FINAL RESPONSE:" in clean_review:
+                        has_final_response = True
+                        self.logger.info("Found 'FINAL RESPONSE' marker, ending review loop")
+                        # Extract the part after "FINAL RESPONSE:"
+                        final_parts = clean_review.split("FINAL RESPONSE:", 1)
+                        if len(final_parts) > 1:
+                            final_response = final_parts[1].strip()
+                        break
+                
+                # Process any additional commands if present
+                commands = CommandParser.extract_commands(ai_review_response)
+                if commands:
+                    self.logger.info(f"Found {len(commands)} additional commands in review response")
+                    # Execute each command and add to context (similar to primary loop)
+                    for cmd_name, cmd_params in commands:
+                        # Add tool call to context
+                        params_str = ", ".join([f"{k}=\"{v}\"" for k, v in cmd_params.items()])
+                        tool_call = f"EXECUTE: {cmd_name}({params_str})"
+                        self.context.append({"role": "tool_call", "content": tool_call})
+                        
+                        # Execute the command
+                        result = self._execute_single_command(cmd_name, cmd_params)
+                        
+                        # Add result to context
+                        self.context.append({"role": "tool_result", "content": result})
+                        
+                        # Don't override final_response here, just add results to context
+            
+            except Exception as e:
+                error_msg = f"Error in review step {review_step+1}: {str(e)}"
+                self.logger.error(error_msg)
+                if not final_response:  # Only set if we don't already have a response
+                    final_response = f"Sorry, I encountered an error during review: {str(e)}"
+                break
+                
+            review_step += 1
+                
+        # If we exited the loop without finding a final response marker, just use what we have
+        if not has_final_response:
+            self.logger.info(f"Reached maximum review rounds ({self.max_review_rounds}) without final response marker")
+            
         return final_response
     
     def _remove_commands(self, text: str) -> str:
@@ -360,6 +451,8 @@ def main():
                         help="Include capabilities context from ai_ghidra_capabilities.txt in prompts")
     parser.add_argument("--max-steps", type=int, default=5, 
                         help="Maximum number of steps for agentic execution loop (default: 5)")
+    parser.add_argument("--max-review-rounds", type=int, default=3,
+                        help="Maximum number of review rounds after tool execution (default: 3)")
     args = parser.parse_args()
     
     # Load config from environment variables
@@ -377,11 +470,12 @@ def main():
         print("Running in MOCK mode - No GhidraMCP server required")
     
     # Pass the flag to the Bridge constructor
-    bridge = Bridge(config, include_capabilities=args.include_capabilities)
-    
-    # Set the max agent steps if provided
-    if args.max_steps:
-        bridge.max_agent_steps = args.max_steps
+    bridge = Bridge(
+        config, 
+        include_capabilities=args.include_capabilities,
+        max_agent_steps=args.max_steps,
+        max_review_rounds=args.max_review_rounds
+    )
     
     if args.health_check:
         status = bridge.health_check()
@@ -393,7 +487,8 @@ def main():
         print("Ollama-GhidraMCP Bridge (Interactive Mode)")
         print(f"Using model: {config.ollama.model}")
         print(f"Capabilities included: {'Yes' if args.include_capabilities else 'No'}")
-        print(f"Agent steps: {bridge.max_agent_steps}")
+        print(f"Tool execution steps: {bridge.max_agent_steps}")
+        print(f"Review rounds: {args.max_review_rounds if hasattr(bridge, 'max_review_rounds') else 3}")
         print("Type 'exit' or 'quit' to exit")
         
         while True:
