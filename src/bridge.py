@@ -10,6 +10,7 @@ import argparse
 import json
 import logging
 import sys
+import os  # Added import
 from typing import Dict, Any, List, Optional
 
 from src.config import BridgeConfig
@@ -39,20 +40,51 @@ def setup_logging(config):
 class Bridge:
     """Main bridge class that connects Ollama with GhidraMCP."""
     
-    def __init__(self, config: BridgeConfig):
+    def __init__(self, config: BridgeConfig, include_capabilities: bool = False):
         """
         Initialize the bridge.
         
         Args:
             config: BridgeConfig object with configuration settings
+            include_capabilities: Flag to include capabilities in prompt
         """
         self.config = config
         self.logger = setup_logging(config)
         self.ollama = OllamaClient(config.ollama)
         self.ghidra = GhidraMCPClient(config.ghidra)
         self.context = []  # Store conversation context
+        self.include_capabilities = include_capabilities  # Store the flag
+        self.capabilities_text = self._load_capabilities_text()  # Load capabilities text on init
         self.logger.info(f"Bridge initialized with Ollama at {config.ollama.base_url} and GhidraMCP at {config.ghidra.base_url}")
+        if self.include_capabilities and self.capabilities_text:
+            self.logger.info("Capabilities context will be included in prompts.")
+        elif self.include_capabilities:
+            self.logger.warning("`--include-capabilities` flag set, but `ai_ghidra_capabilities.txt` not found or empty.")
     
+    def _load_capabilities_text(self) -> Optional[str]:
+        """Load the capabilities text from the file if the flag is set."""
+        if not self.include_capabilities:
+            return None
+            
+        capabilities_file = "ai_ghidra_capabilities.txt"
+        try:
+            # Assuming the script is run from the project root
+            file_path = os.path.join(os.path.dirname(__file__), '..', capabilities_file) 
+            if os.path.exists(file_path):
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    return f.read()
+            else:
+                # Try reading from the current working directory as a fallback
+                if os.path.exists(capabilities_file):
+                    with open(capabilities_file, 'r', encoding='utf-8') as f:
+                        return f.read()
+                else:
+                    self.logger.warning(f"Capabilities file '{capabilities_file}' not found.")
+                    return None
+        except Exception as e:
+            self.logger.error(f"Error reading capabilities file '{capabilities_file}': {str(e)}")
+            return None
+
     def process_query(self, query: str) -> str:
         """
         Process a natural language query through the AI and execute commands on GhidraMCP.
@@ -66,17 +98,26 @@ class Bridge:
         # Add the query to context
         self.context.append({"role": "user", "content": query})
         
-        # Include previous context in the prompt
-        full_prompt = "\n\n".join([
+        # Construct the base prompt from context
+        context_prompt = "\n\n".join([
             f"{'User' if item['role'] == 'user' else 'Assistant'}: {item['content']}" 
             for item in self.context[-self.config.context_limit:]  # Use context_limit from config
         ])
-        full_prompt += "\n\nPlease help with this request and suggest Ghidra commands if appropriate."
         
+        # Prepend capabilities if flag is set and text loaded
+        capabilities_prefix = ""
+        if self.include_capabilities and self.capabilities_text:
+            capabilities_prefix = f"Context: Available Ghidra interaction tools and their functions:\n```\n{self.capabilities_text}\n```\n\n---\n\n"
+
+        # Combine capabilities prefix, context, and final instruction
+        full_prompt = capabilities_prefix + context_prompt 
+        full_prompt += "\n\nPlease analyze the request based *only* on the provided context and available tools. Execute the necessary tool calls directly if appropriate."
+
         # Send to Ollama
         self.logger.info(f"Sending query to Ollama: {query[:100]}...")
         
         try:
+            # Use the potentially modified full_prompt
             ai_response = self.ollama.generate(full_prompt, self.config.ollama.default_system_prompt)
             self.logger.info(f"Received response from Ollama: {ai_response[:100]}...")
             
@@ -170,6 +211,7 @@ def main():
     parser.add_argument("--interactive", action="store_true", help="Run in interactive mode")
     parser.add_argument("--health-check", action="store_true", help="Check health of services and exit")
     parser.add_argument("--mock", action="store_true", help="Run in mock mode (no GhidraMCP server needed)")
+    parser.add_argument("--include-capabilities", action="store_true", help="Include capabilities context from ai_ghidra_capabilities.txt in prompts")
     args = parser.parse_args()
     
     # Load config from environment variables
@@ -186,7 +228,8 @@ def main():
         config.ghidra.mock_mode = True
         print("Running in MOCK mode - No GhidraMCP server required")
     
-    bridge = Bridge(config)
+    # Pass the flag to the Bridge constructor
+    bridge = Bridge(config, include_capabilities=args.include_capabilities)
     
     if args.health_check:
         status = bridge.health_check()
