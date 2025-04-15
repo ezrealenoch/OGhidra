@@ -237,6 +237,14 @@ class Bridge:
             # Store the plan in the context and the state
             self.current_plan = plan_response
             self.context.append({"role": "plan", "content": plan_response})
+            
+            # Store planning phase output
+            self.partial_outputs.append({
+                "type": "planning", 
+                "content": plan_response,
+                "phase": "planning"
+            })
+            
             self.logger.info("Planning phase completed")
             
         except Exception as e:
@@ -262,6 +270,13 @@ class Bridge:
                 # Get AI response
                 ai_response = self.ollama.generate(prompt, self.config.ollama.default_system_prompt)
                 self.logger.info(f"Received response from Ollama: {ai_response[:100]}...")
+                
+                # Capture the full response as logged
+                self.partial_outputs.append({
+                    "type": "raw_response",
+                    "content": ai_response,
+                    "step": step + 1
+                })
                 
                 # Check if this is a clarification request
                 if self._check_for_clarification_request(ai_response):
@@ -371,6 +386,13 @@ class Bridge:
                 # Get AI's review response
                 ai_review_response = self.ollama.generate(prompt, self.config.ollama.default_system_prompt)
                 self.logger.info(f"Received review response: {ai_review_response[:100]}...")
+                
+                # Capture the full review response as logged
+                self.partial_outputs.append({
+                    "type": "raw_review",
+                    "content": ai_review_response,
+                    "review_step": review_step + 1
+                })
                 
                 # Check if this is a clarification request
                 if self._check_for_clarification_request(ai_review_response):
@@ -782,92 +804,188 @@ class Bridge:
     def _generate_cohesive_report(self) -> str:
         """
         Generate a cohesive report from partial outputs collected during the agentic process.
-        This combines all reasoning steps and tool results into a structured report.
+        This combines all reasoning steps, planning, tool results, and errors into a structured report.
         
         Returns:
             A cohesive report combining all partial outputs
         """
         if not self.partial_outputs:
-            return "No analysis was performed."
+            return "No analysis was performed or captured."
             
         report_sections = {
+            "plan": [],              # Added section for the initial plan
             "findings": [],
+            "insights": [],
             "analysis": [],
             "tools": [],
+            "errors": [],            # Added section for errors
             "conclusions": []
         }
         
-        # Process reasoning outputs (both from main execution and review)
+        # First, process the raw responses to capture information that might be truncated in cleaned responses
+        raw_responses = []
         for output in self.partial_outputs:
-            if output["type"] in ["reasoning", "review"]:
-                content = output["content"]
+            if output["type"] in ["raw_response", "raw_review"]:
+                raw_responses.append(output["content"])
+        
+        # Process partial outputs to populate sections
+        for output in self.partial_outputs:
+            content = output.get("content", "")
+            output_type = output.get("type", "")
+            
+            # --- Capture Initial Plan ---
+            if output_type == "planning":
+                report_sections["plan"].append(content)
+                continue # Skip further processing for plan content
                 
-                # Extract findings (usually in list form)
-                if any(marker in content for marker in ["I found:", "Findings:", "Key observations:"]):
-                    for line in content.split('\n'):
-                        if line.strip().startswith('- ') or line.strip().startswith('* '):
-                            report_sections["findings"].append(line.strip())
+            # --- Process Reasoning (Cleaned & Raw) ---
+            if output_type in ["reasoning", "review"]:
+                # Use the cleaned reasoning/review content for keyword/structure matching
                 
+                # Extract numbered insights
+                numbered_insights = []
+                in_numbered_list = False
+                current_insight = ""
+                for line in content.split('\n'):
+                    if re.match(r'^\s*\d+\.\s', line):
+                        if in_numbered_list and current_insight.strip(): numbered_insights.append(current_insight.strip())
+                        in_numbered_list = True
+                        current_insight = line.strip()
+                    elif in_numbered_list and line.strip(): current_insight += " " + line.strip()
+                    elif in_numbered_list: # End of item
+                        if current_insight.strip(): numbered_insights.append(current_insight.strip())
+                        in_numbered_list = False
+                        current_insight = ""
+                if in_numbered_list and current_insight.strip(): numbered_insights.append(current_insight.strip())
+                if numbered_insights: report_sections["insights"].extend(numbered_insights)
+                
+                # Extract bulleted findings
+                findings_section = False
+                for line in content.split('\n'):
+                    if any(marker in line.lower() for marker in ["i found:", "findings:", "key observations:", "key finding"]):
+                        findings_section = True
+                    elif findings_section and not line.strip(): findings_section = False
+                    if findings_section or line.strip().startswith('- ') or line.strip().startswith('* '):
+                        if line.strip(): report_sections["findings"].append(line.strip())
+                        
                 # Extract conclusions
-                if any(marker in content for marker in ["In conclusion", "To summarize", "In summary"]):
+                if any(marker in content.lower() for marker in ["in conclusion", "to summarize", "in summary", "conclusion:", "final analysis"]):
                     conclusion_text = ""
                     in_conclusion = False
                     for line in content.split('\n'):
-                        if any(marker in line for marker in ["In conclusion", "To summarize", "In summary"]):
+                        if any(marker in line.lower() for marker in ["in conclusion", "to summarize", "in summary", "conclusion:", "final analysis"]):
                             in_conclusion = True
-                        if in_conclusion and line.strip():
-                            conclusion_text += line + "\n"
-                    if conclusion_text:
-                        report_sections["conclusions"].append(conclusion_text.strip())
+                        if in_conclusion and line.strip(): conclusion_text += line + "\n"
+                    if conclusion_text: report_sections["conclusions"].append(conclusion_text.strip())
                 
-                # Extract analysis parts not already captured
+                # Extract general analysis (exclude already captured parts)
                 analysis_content = content
-                # Remove parts that would be in findings or conclusions
-                for finding in report_sections["findings"]:
-                    analysis_content = analysis_content.replace(finding, "")
-                for conclusion in report_sections["conclusions"]:
-                    analysis_content = analysis_content.replace(conclusion, "")
-                
+                for category in ["findings", "insights", "conclusions"]:
+                    for item in report_sections[category]:
+                        analysis_content = analysis_content.replace(item, "")
                 if analysis_content.strip():
-                    report_sections["analysis"].append(analysis_content.strip())
+                    # Only add if it contains relevant technical terms
+                    if any(term in analysis_content.lower() for term in ["function", "address", "import", "export", "binary", "assembly", "code", "decompile", "call", "pointer", "struct"]):
+                        report_sections["analysis"].append(analysis_content.strip())
         
-        # Add tool results in chronological order
+        # --- Process Raw Responses for Additional Detail (before EXECUTE) ---
+        for raw_response in raw_responses:
+            # Extract text before the first EXECUTE block
+            pre_execute_text = raw_response.split("EXECUTE:", 1)[0].strip()
+            if not pre_execute_text:
+                continue
+            
+            # Extract numbered insights from raw text
+            numbered_insights_raw = []
+            in_numbered_list_raw = False
+            current_insight_raw = ""
+            for line in pre_execute_text.split('\n'):
+                if re.match(r'^\s*\d+\.\s', line):
+                    if in_numbered_list_raw and current_insight_raw.strip(): numbered_insights_raw.append(current_insight_raw.strip())
+                    in_numbered_list_raw = True
+                    current_insight_raw = line.strip()
+                elif in_numbered_list_raw and line.strip(): current_insight_raw += " " + line.strip()
+                elif in_numbered_list_raw:
+                    if current_insight_raw.strip(): numbered_insights_raw.append(current_insight_raw.strip())
+                    in_numbered_list_raw = False
+                    current_insight_raw = ""
+            if in_numbered_list_raw and current_insight_raw.strip(): numbered_insights_raw.append(current_insight_raw.strip())
+            if numbered_insights_raw: report_sections["insights"].extend(numbered_insights_raw)
+            
+            # Extract bulleted findings from raw text
+            for line in pre_execute_text.split('\n'):
+                 if (line.strip().startswith('- ') or line.strip().startswith('* ')):
+                     if line.strip(): report_sections["findings"].append(line.strip())
+                     
+            # Extract general analysis from raw text (exclude already captured parts)
+            analysis_content_raw = pre_execute_text
+            for category in ["findings", "insights"]:
+                for item in report_sections[category]:
+                    analysis_content_raw = analysis_content_raw.replace(item, "")
+            if analysis_content_raw.strip():
+                 if any(term in analysis_content_raw.lower() for term in ["function", "address", "import", "export", "binary", "assembly", "code", "decompile", "call", "pointer", "struct"]):
+                     report_sections["analysis"].append(analysis_content_raw.strip())
+        
+        # --- Process Tool Results & Errors ---
         tool_results = []
         for output in self.partial_outputs:
             if output["type"] in ["tool_result", "review_tool_result"]:
+                result_text = output.get("result", "")
                 step_info = f"Step {output.get('step', output.get('review_step', '?'))}"
-                tool_info = f"{output['tool']}({', '.join([f'{k}={v}' for k, v in output.get('params', {}).items()])})"
-                result_summary = output['result'].replace("\n", " ")[:100] + "..." if len(output['result']) > 100 else output['result']
-                tool_results.append(f"{step_info}: {tool_info} -> {result_summary}")
+                tool_info = f"{output.get('tool', 'unknown')}({', '.join([f'{k}={v}' for k, v in output.get('params', {}).items()])})"
+                
+                # Check for errors
+                if "ERROR:" in result_text or "Failed" in result_text:
+                    report_sections["errors"].append(f"{step_info}: {tool_info} -> {result_text}")
+                else:
+                    # Successful result - summarize and add to tools list
+                    result_lines = result_text.split('\n')
+                    # Remove the RESULT: prefix if present
+                    result_content = '\n'.join([l.replace("RESULT: ", "", 1) for l in result_lines if l.strip()])
+                    result_summary = result_content[:150] + ("..." if len(result_content) > 150 else "")
+                    tool_results.append(f"{step_info}: {tool_info} -> {result_summary}")
         
         report_sections["tools"] = tool_results
         
-        # Build the final report
+        # --- Deduplicate Sections --- 
+        for section in report_sections:
+            if isinstance(report_sections[section], list):
+                seen = set()
+                # Keep order, filter duplicates (case-insensitive for strings)
+                report_sections[section] = [x for x in report_sections[section] if not ( (x.lower() if isinstance(x, str) else x) in seen or seen.add( (x.lower() if isinstance(x, str) else x) ) )]
+        
+        # --- Build the Final Report String --- 
         report = "# Analysis Report\n\n"
         
+        if report_sections["plan"]:
+            report += "## Initial Plan\n"
+            report += "\n".join(report_sections["plan"]) + "\n\n"
+        
+        if report_sections["insights"]:
+            report += "## Key Insights\n"
+            report += "\n".join(report_sections["insights"]) + "\n\n"
+        
         if report_sections["findings"]:
-            report += "## Key Findings\n"
-            for finding in report_sections["findings"]:
-                report += f"{finding}\n"
-            report += "\n"
+            report += "## Findings\n"
+            report += "\n".join(report_sections["findings"]) + "\n\n"
         
         if report_sections["analysis"]:
-            report += "## Analysis\n"
-            for analysis in report_sections["analysis"]:
-                report += f"{analysis}\n\n"
+            report += "## Analysis Details\n"
+            report += "\n\n".join(report_sections["analysis"]) + "\n\n"
         
         if report_sections["tools"]:
-            report += "## Tools Used\n"
-            for tool in report_sections["tools"]:
-                report += f"- {tool}\n"
-            report += "\n"
+            report += "## Tools Used (Successful)\n"
+            report += "\n".join([f"- {tool}" for tool in report_sections["tools"]]) + "\n\n"
+            
+        if report_sections["errors"]:
+            report += "## Errors Encountered\n"
+            report += "\n".join([f"- {error}" for error in report_sections["errors"]]) + "\n\n"
         
         if report_sections["conclusions"]:
             report += "## Conclusions\n"
-            for conclusion in report_sections["conclusions"]:
-                report += f"{conclusion}\n"
+            report += "\n".join(report_sections["conclusions"]) + "\n"
         
-        return report
+        return report.strip()
 
 def main():
     """Main entry point for the bridge application."""
