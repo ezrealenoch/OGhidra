@@ -6,6 +6,9 @@ This module provides integration between the agent and the bridge's CLI interfac
 
 import logging
 import argparse
+import threading
+import queue
+import sys
 from typing import Dict, Any, List, Optional
 
 from src.config import BridgeConfig
@@ -25,6 +28,8 @@ class AgentCLIHandler:
         """
         self.config = config
         self.agent = None
+        self.exit_flag = False
+        self.exit_queue = queue.Queue()
         logger.info("Initialized Agent CLI Handler")
         
     def setup_parser(self, subparsers) -> None:
@@ -82,6 +87,27 @@ class AgentCLIHandler:
         else:
             logger.error("No agent command specified")
             return 1
+    
+    def _input_thread_func(self):
+        """Thread function to listen for user interrupt."""
+        print("\nPress 'q' or 'exit' and Enter to stop the agent at any time.")
+        while not self.exit_flag:
+            try:
+                user_input = input()
+                if user_input.lower() in ('q', 'exit', 'quit'):
+                    print("Stopping agent after current iteration...")
+                    self.exit_queue.put(True)
+                    break
+            except (EOFError, KeyboardInterrupt):
+                # Handle EOF or keyboard interrupt
+                break
+    
+    def _check_exit(self) -> bool:
+        """Check if user wants to exit the analysis."""
+        try:
+            return not self.exit_queue.empty()
+        except:
+            return False
             
     def analyze_application(self, task_description: str, max_iterations: int, verbose: bool) -> int:
         """
@@ -105,15 +131,30 @@ class AgentCLIHandler:
             # Set up a progress observer if verbose output is requested
             if verbose:
                 self.agent.register_observer(self._progress_print_observer)
+            
+            # Start input thread to listen for user interrupt
+            self.exit_flag = False
+            input_thread = threading.Thread(target=self._input_thread_func, daemon=True)
+            input_thread.start()
                 
-            # Run the analysis
-            analysis_result = self.agent.analyze_application(task_description)
+            # Run the analysis with exit check
+            analysis_result = self.agent.analyze_application(
+                task_description=task_description,
+                check_exit=self._check_exit
+            )
+            
+            # Signal thread to exit
+            self.exit_flag = True
             
             # Print the analysis result
             print("\n\n===== ANALYSIS RESULT =====\n")
             print(analysis_result)
             print("\n==========================\n")
             
+            return 0
+        except KeyboardInterrupt:
+            logger.info("User interrupted the analysis")
+            print("\nAnalysis interrupted by user.")
             return 0
         except Exception as e:
             logger.error(f"Error during application analysis: {str(e)}")

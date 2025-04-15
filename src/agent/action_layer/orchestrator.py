@@ -142,13 +142,15 @@ class ActionOrchestrator:
         
         return formatted
     
-    def analyze_application(self, task_description: str, system_prompt: Optional[str] = None) -> str:
+    def analyze_application(self, task_description: str, system_prompt: Optional[str] = None, 
+                            check_exit: Optional[Callable[[], bool]] = None) -> str:
         """
         Analyze an application using the agent.
         
         Args:
             task_description: Description of the analysis task
             system_prompt: Optional system prompt to guide the LLM's behavior
+            check_exit: Optional function to check if user wants to exit
             
         Returns:
             Analysis report
@@ -166,7 +168,8 @@ class ActionOrchestrator:
         # Start the analysis process with a callback function
         analysis_result = self.agent.analyze_application(
             task_description=task_description,
-            callback=self.notify_observers
+            callback=self.notify_observers,
+            check_exit=check_exit
         )
         
         return analysis_result
@@ -214,9 +217,33 @@ class ActionOrchestrator:
             # Get the tool function
             tool_function = tools_map[tool_name]
             
+            # Get the function signature using inspection
+            import inspect
+            sig = inspect.signature(tool_function)
+            valid_params = list(sig.parameters.keys())
+            
+            # Check if there are any invalid parameters
+            invalid_params = [p for p in parameters.keys() if p not in valid_params]
+            if invalid_params:
+                error_msg = f"Invalid parameters for {tool_name}: {', '.join(invalid_params)}"
+                error_msg += f"\nValid parameters are: {', '.join(valid_params)}"
+                
+                # For commonly confused tools, provide specific guidance
+                if tool_name == "decompile_function" and "address" in invalid_params:
+                    error_msg += "\nTo decompile a function by address, use 'decompile_function_by_address' instead"
+                elif tool_name == "get_function_details" and "address" in invalid_params:
+                    error_msg += "\nTo get function details by address, use 'get_function_details_by_address' instead"
+                
+                logger.error(error_msg)
+                self.notify_observers("error", "Tool Execution Error", error_msg)
+                return error_msg
+            
+            # Filter parameters to only include valid ones
+            filtered_params = {k: v for k, v in parameters.items() if k in valid_params}
+            
             # Execute the tool
-            self.notify_observers("action", f"Executing {tool_name}", str(parameters))
-            result = tool_function(**parameters)
+            self.notify_observers("action", f"Executing {tool_name}", str(filtered_params))
+            result = tool_function(**filtered_params)
             self.notify_observers("observation", f"Result of {tool_name}", str(result))
             
             return result

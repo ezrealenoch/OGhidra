@@ -41,7 +41,7 @@ class GhidraTools:
         Retrieve detailed information about a specific function.
         
         Args:
-            function_name: The name of the function
+            function_name: The name of the function (e.g., "FUN_140001000")
             
         Returns:
             Dictionary containing function details
@@ -72,7 +72,7 @@ class GhidraTools:
         Retrieve detailed information about a function at a specific address.
         
         Args:
-            address: Memory address of the function
+            address: Memory address of the function (e.g., "140001000")
             
         Returns:
             Dictionary containing function details

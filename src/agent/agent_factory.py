@@ -78,6 +78,14 @@ Your task is to analyze the behavior of a binary application using the available
 
 {available_tools_description}
 
+IMPORTANT PARAMETER RULES:
+1. Use the EXACT parameter names listed for each tool
+2. For decompile_function: use the function name parameter (e.g., "FUN_140001000")
+3. For decompile_function_by_address: use the address parameter (e.g., "140001000")
+4. For get_function_details: use the function_name parameter
+5. For get_function_details_by_address: use the address parameter
+6. Always provide parameters as strings in quotes
+
 IMPORTANT: You can ONLY use the tools listed above. Do not attempt to use any other tools.
 If you try a tool that isn't available, you'll receive suggestions for alternative tools.
 

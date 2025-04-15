@@ -193,13 +193,15 @@ class AgentLogic:
         
     def analyze_application(self, 
                            task_description: str, 
-                           callback: Optional[Callable[[str, str, str], None]] = None) -> str:
+                           callback: Optional[Callable[[str, str, str], None]] = None,
+                           check_exit: Optional[Callable[[], bool]] = None) -> str:
         """
         Analyze the application behavior through an iterative process.
         
         Args:
             task_description: Description of the analysis task
             callback: Optional callback function for progress updates
+            check_exit: Optional function to check if user wants to exit
             
         Returns:
             Final analysis of the application behavior
@@ -220,6 +222,11 @@ class AgentLogic:
         
         # Iterative analysis process
         while continue_analysis and iteration < self.max_iterations:
+            # Check if user wants to exit
+            if check_exit and check_exit():
+                logger.info("User requested to exit the analysis")
+                break
+                
             iteration += 1
             logger.info(f"Starting analysis iteration {iteration}/{self.max_iterations}")
             
