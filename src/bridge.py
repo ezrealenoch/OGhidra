@@ -192,6 +192,135 @@ class Bridge:
             
         return full_prompt
     
+    def _check_final_response_quality(self, response: str) -> bool:
+        """
+        Check if the final response is of good quality and doesn't indicate tool limitations.
+        
+        Args:
+            response: The potential final response text
+            
+        Returns:
+            True if the response is complete and satisfactory, False if it indicates incomplete analysis
+        """
+        # Look for phrases that indicate the model couldn't complete the task
+        limitation_phrases = [
+            "i cannot", "cannot directly", "i'm unable to", "unable to", 
+            "doesn't include", "not available", "no way to", "would need",
+            "don't have access", "no access to", "not possible with",
+            "not able to", "couldn't find", "missing", "not found",
+            "not supported", "no tool", "no command", "doesn't exist",
+            "the current toolset doesn't"
+        ]
+        
+        # Check if the response contains any of these limitation phrases
+        response_lower = response.lower()
+        for phrase in limitation_phrases:
+            if phrase in response_lower:
+                self.logger.info(f"Final response indicates limitation: '{phrase}'")
+                return False
+                
+        # Check if response is too short
+        if len(response.strip()) < 150:
+            self.logger.info(f"Final response is too short ({len(response.strip())} chars)")
+            return False
+            
+        # Check if final response has error messages
+        if "ERROR:" in response or "Failed" in response:
+            self.logger.info("Final response contains error messages")
+            return False
+            
+        return True
+
+    def _execute_single_command(self, command_name: str, params: Dict[str, Any]) -> str:
+        """
+        Execute a single GhidraMCP command with enhanced error handling and automatic recovery.
+        
+        Args:
+            command_name: Name of the GhidraMCP command
+            params: Command parameters
+            
+        Returns:
+            Result or error string with suggestions
+        """
+        try:
+            # Check if the command is available in the GhidraMCP client
+            if hasattr(self.ghidra, command_name):
+                self.logger.info(f"Executing GhidraMCP command: {command_name} with params: {params}")
+                
+                # Call the method on the GhidraMCP client
+                cmd_method = getattr(self.ghidra, command_name)
+                cmd_result = cmd_method(**params)
+                
+                # Check if there was an error
+                if isinstance(cmd_result, dict) and "error" in cmd_result:
+                    error_msg = self._handle_command_error(command_name, params, cmd_result.get("error", "Unknown error"))
+                    return error_msg
+                elif isinstance(cmd_result, str) and ("Failed" in cmd_result or "Error" in cmd_result):
+                    error_msg = self._handle_command_error(command_name, params, cmd_result)
+                    return error_msg
+                else:
+                    # Success! Update the analysis state
+                    self._update_analysis_state(command_name, params, str(cmd_result))
+                    
+                    # Format the command result
+                    if isinstance(cmd_result, (list, dict)):
+                        formatted_result = f"RESULT: {json.dumps(cmd_result, indent=2)}"
+                    else:
+                        formatted_result = f"RESULT: {cmd_result}"
+                    return formatted_result
+            else:
+                # Handle the case of an unknown command by providing alternative suggestions
+                error_msg = f"ERROR: Unknown command '{command_name}'"
+                self.logger.error(error_msg)
+                
+                # Suggest alternative commands based on similarity
+                similar_commands = self._find_similar_commands(command_name)
+                if similar_commands:
+                    error_msg += f"\nDid you mean: {', '.join(similar_commands)}?"
+                    
+                # Check for common command patterns and suggest alternatives
+                if command_name.startswith("search_"):
+                    search_type = command_name[7:]  # Remove "search_" prefix
+                    error_msg += f"\nTo search for {search_type}, try using search_functions_by_name with a relevant query."
+                
+                return error_msg
+        except Exception as e:
+            error_msg = self._handle_command_error(command_name, params, str(e))
+            return error_msg
+            
+    def _find_similar_commands(self, unknown_command: str) -> List[str]:
+        """
+        Find similar commands to suggest when an unknown command is used.
+        
+        Args:
+            unknown_command: The unknown command
+            
+        Returns:
+            List of similar command suggestions
+        """
+        available_commands = [
+            name for name in dir(self.ghidra) 
+            if not name.startswith('_') and callable(getattr(self.ghidra, name))
+        ]
+        
+        # Find commands with similar prefix or suffix
+        similar_commands = []
+        
+        # Split the unknown command by underscores
+        parts = unknown_command.split('_')
+        
+        for cmd in available_commands:
+            # Check for commands with similar prefix
+            if cmd.startswith(parts[0]) or unknown_command.startswith(cmd.split('_')[0]):
+                similar_commands.append(cmd)
+                continue
+                
+            # Check for commands with similar purpose
+            if len(parts) > 1 and parts[-1] in cmd:
+                similar_commands.append(cmd)
+                
+        return similar_commands[:3]  # Return top 3 similar commands
+
     def process_query(self, query: str) -> str:
         """
         Process a natural language query through the AI and execute commands on GhidraMCP,
@@ -260,6 +389,11 @@ class Bridge:
             
         # 2. Primary agentic execution loop - allows multiple steps of reasoning with tools
         self.logger.info("Starting tool execution phase")
+        
+        # Track if any errors were encountered during tool execution
+        tool_errors_encountered = False
+        unknown_commands_attempted = set()
+        
         for step in range(self.max_agent_steps):
             # Check if we should summarize context
             if self._should_summarize_context():
@@ -315,6 +449,8 @@ class Bridge:
                 
                 # Execute each command and add to context
                 all_results = []
+                step_errors = False
+                
                 for cmd_name, cmd_params in commands:
                     # Add tool call to context
                     params_str = ", ".join([f"{k}=\"{v}\"" for k, v in cmd_params.items()])
@@ -324,6 +460,15 @@ class Bridge:
                     # Execute the command
                     result = self._execute_single_command(cmd_name, cmd_params)
                     all_results.append((tool_call, result))
+                    
+                    # Check if this was an error and track unknown commands
+                    if "ERROR: Unknown command" in result:
+                        unknown_commands_attempted.add(cmd_name)
+                        step_errors = True
+                        tool_errors_encountered = True
+                    elif "ERROR:" in result or "Failed" in result:
+                        step_errors = True
+                        tool_errors_encountered = True
                     
                     # Add result to context
                     self.context.append({"role": "tool_result", "content": result})
@@ -341,8 +486,7 @@ class Bridge:
                 final_response = clean_response + "\n\n" + "\n".join([result for _, result in all_results])
                 
                 # Check if any command failed - if so, let the AI try again in the next step
-                any_errors = any(["ERROR" in result or "Failed" in result for _, result in all_results])
-                if not any_errors:
+                if not step_errors:
                     # If all commands succeeded, we can break the loop
                     self.logger.info("All commands executed successfully, ending tool execution loop")
                     break
@@ -351,6 +495,7 @@ class Bridge:
                 error_msg = f"Error in agent step {step+1}: {str(e)}"
                 self.logger.error(error_msg)
                 final_response = f"Sorry, I encountered an error: {str(e)}"
+                tool_errors_encountered = True
                 break
         
         # 3. Secondary review and reasoning loop - evaluates completeness of response
@@ -365,21 +510,47 @@ class Bridge:
                 
             # Check if current final_response already contains "FINAL RESPONSE"
             if "FINAL RESPONSE:" in final_response:
-                has_final_response = True
-                self.logger.info("Found 'FINAL RESPONSE' marker, ending review loop")
                 # Extract the part after "FINAL RESPONSE:"
                 final_parts = final_response.split("FINAL RESPONSE:", 1)
+                potential_final = ""
                 if len(final_parts) > 1:
-                    final_response = final_parts[1].strip()
-                break
+                    potential_final = final_parts[1].strip()
                 
-            # Add a review prompt to encourage finalizing the response
-            review_prompt = (
-                f"Review your analysis so far. Have you completed the task? "
-                f"If not, what additional information or analysis is needed? "
-                f"If yes, provide a complete and comprehensive final answer prefixed with 'FINAL RESPONSE:'"
-            )
-            self.context.append({"role": "review", "content": review_prompt})
+                # Check the quality of the final response
+                if self._check_final_response_quality(potential_final):
+                    has_final_response = True
+                    self.logger.info("Found high-quality 'FINAL RESPONSE' marker, ending review loop")
+                    final_response = potential_final
+                    break
+                else:
+                    # If the final response indicates limitations, continue with more review steps
+                    self.logger.info("Found 'FINAL RESPONSE' marker but response indicates limitations, continuing review")
+                    # If tool errors were encountered, mention them explicitly in the prompt
+                    if tool_errors_encountered:
+                        review_prompt = (
+                            f"Some tool errors or missing commands were encountered during execution. "
+                            f"Based on the available information so far, please provide the most complete analysis possible "
+                            f"using only the tools that worked successfully. "
+                            f"If you've completed your analysis with available tools, provide a final answer prefixed with 'FINAL RESPONSE:'"
+                        )
+                        if unknown_commands_attempted:
+                            cmd_list = ", ".join(f"'{cmd}'" for cmd in unknown_commands_attempted)
+                            review_prompt += f"\n\nNote: These commands are not available: {cmd_list}. Use alternatives."
+                    else:
+                        review_prompt = (
+                            f"Your previous final response indicated some limitations. Please review your analysis again "
+                            f"and see if you can overcome these limitations with alternative approaches. "
+                            f"If you've completed your analysis, provide a final answer prefixed with 'FINAL RESPONSE:'"
+                        )
+                    self.context.append({"role": "review", "content": review_prompt})
+            else:
+                # Regular review prompt
+                review_prompt = (
+                    f"Review your analysis so far. Have you completed the task? "
+                    f"If not, what additional information or analysis is needed? "
+                    f"If yes, provide a complete and comprehensive final answer prefixed with 'FINAL RESPONSE:'"
+                )
+                self.context.append({"role": "review", "content": review_prompt})
             
             # Build a new prompt with the review context
             prompt = self._build_structured_prompt()
@@ -422,13 +593,27 @@ class Bridge:
                     
                     # Check if this response has the final marker
                     if "FINAL RESPONSE:" in clean_review:
-                        has_final_response = True
-                        self.logger.info("Found 'FINAL RESPONSE' marker, ending review loop")
                         # Extract the part after "FINAL RESPONSE:"
                         final_parts = clean_review.split("FINAL RESPONSE:", 1)
+                        potential_final = ""
                         if len(final_parts) > 1:
-                            final_response = final_parts[1].strip()
-                        break
+                            potential_final = final_parts[1].strip()
+                        
+                        # Check the quality of the final response
+                        if self._check_final_response_quality(potential_final):
+                            has_final_response = True
+                            self.logger.info("Found high-quality 'FINAL RESPONSE' marker in review, ending review loop")
+                            final_response = potential_final
+                            break
+                        else:
+                            # If tool errors were encountered and we're near the end of review rounds, accept the response anyway
+                            if tool_errors_encountered and review_step >= self.max_review_rounds - 2:
+                                has_final_response = True
+                                self.logger.info("Accepting final response despite limitations due to tool errors")
+                                final_response = potential_final
+                                break
+                            else:
+                                self.logger.info("Found 'FINAL RESPONSE' marker but response indicates limitations, continuing review")
                 
                 # Process any additional commands if present
                 commands = CommandParser.extract_commands(ai_review_response)
@@ -446,6 +631,11 @@ class Bridge:
                         
                         # Add result to context
                         self.context.append({"role": "tool_result", "content": result})
+                        
+                        # Check if this was an error and track unknown commands
+                        if "ERROR: Unknown command" in result:
+                            unknown_commands_attempted.add(cmd_name)
+                            tool_errors_encountered = True
                         
                         # Store the tool result from review as a partial output
                         self.partial_outputs.append({
@@ -486,51 +676,6 @@ class Bridge:
         """
         return CommandParser.remove_commands(text)
     
-    def _execute_single_command(self, command_name: str, params: Dict[str, Any]) -> str:
-        """
-        Execute a single GhidraMCP command with enhanced error handling and automatic recovery.
-        
-        Args:
-            command_name: Name of the GhidraMCP command
-            params: Command parameters
-            
-        Returns:
-            Result or error string with suggestions
-        """
-        try:
-            # Check if the command is available in the GhidraMCP client
-            if hasattr(self.ghidra, command_name):
-                self.logger.info(f"Executing GhidraMCP command: {command_name} with params: {params}")
-                
-                # Call the method on the GhidraMCP client
-                cmd_method = getattr(self.ghidra, command_name)
-                cmd_result = cmd_method(**params)
-                
-                # Check if there was an error
-                if isinstance(cmd_result, dict) and "error" in cmd_result:
-                    error_msg = self._handle_command_error(command_name, params, cmd_result.get("error", "Unknown error"))
-                    return error_msg
-                elif isinstance(cmd_result, str) and ("Failed" in cmd_result or "Error" in cmd_result):
-                    error_msg = self._handle_command_error(command_name, params, cmd_result)
-                    return error_msg
-                else:
-                    # Success! Update the analysis state
-                    self._update_analysis_state(command_name, params, str(cmd_result))
-                    
-                    # Format the command result
-                    if isinstance(cmd_result, (list, dict)):
-                        formatted_result = f"RESULT: {json.dumps(cmd_result, indent=2)}"
-                    else:
-                        formatted_result = f"RESULT: {cmd_result}"
-                    return formatted_result
-            else:
-                error_msg = f"ERROR: Unknown command '{command_name}'"
-                self.logger.error(error_msg)
-                return error_msg
-        except Exception as e:
-            error_msg = self._handle_command_error(command_name, params, str(e))
-            return error_msg
-            
     def _handle_command_error(self, command_name: str, params: Dict[str, Any], error_message: str) -> str:
         """
         Handle command errors with recovery actions and enhanced error messages.
