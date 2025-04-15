@@ -62,6 +62,7 @@ class ActionOrchestrator:
         """
         # Direct mapping of tool names to GhidraTools methods
         tools_map = {
+            # Information gathering tools
             "get_function_list": self.tools.get_function_list,
             "get_function_details": self.tools.get_function_details,
             "get_function_details_by_address": self.tools.get_function_details_by_address,
@@ -72,12 +73,74 @@ class ActionOrchestrator:
             "search_for_pattern": self.tools.search_for_pattern,
             "get_imports": self.tools.get_imports,
             "get_exports": self.tools.get_exports,
+            
+            # Add direct access to underlying GhidraMCPClient methods for completeness
+            "disassemble_function": self.tools.ghidra.disassemble_function,
+            "decompile_function": self.tools.ghidra.decompile_function,
+            "decompile_function_by_address": self.tools.ghidra.decompile_function_by_address,
+            "list_functions": self.tools.ghidra.list_functions,
+            "list_imports": self.tools.ghidra.list_imports,
+            "list_exports": self.tools.ghidra.list_exports,
+            "list_segments": self.tools.ghidra.list_segments,
+            "list_classes": self.tools.ghidra.list_classes,
+            "list_namespaces": self.tools.ghidra.list_namespaces,
+            "list_data_items": self.tools.ghidra.list_data_items,
+            "search_functions_by_name": self.tools.ghidra.search_functions_by_name,
+            
+            # Modification tools
             "rename_function": self.tools.rename_function,
+            "rename_function_by_address": self.tools.ghidra.rename_function_by_address,
             "add_function_comment": self.tools.add_function_comment,
-            "rename_variable": self.tools.rename_variable
+            "rename_variable": self.tools.rename_variable,
+            "set_decompiler_comment": self.tools.ghidra.set_decompiler_comment,
+            "set_disassembly_comment": self.tools.ghidra.set_disassembly_comment,
+            "set_function_prototype": self.tools.ghidra.set_function_prototype,
+            "set_local_variable_type": self.tools.ghidra.set_local_variable_type
         }
         
         return tools_map
+    
+    def get_available_tools_description(self) -> str:
+        """
+        Get a description of all available tools.
+        
+        Returns:
+            Formatted string listing all available tools with their descriptions
+        """
+        tools_map = self._map_tools_to_functions()
+        
+        # Group tools by category
+        categories = {
+            "Information gathering tools": [
+                "get_function_list", "get_function_details", "get_function_details_by_address",
+                "get_data_references", "get_string_at_address", "get_control_flow_graph",
+                "get_memory_regions", "search_for_pattern", "get_imports", "get_exports",
+                "disassemble_function", "decompile_function", "decompile_function_by_address",
+                "list_functions", "list_imports", "list_exports", "list_segments",
+                "list_classes", "list_namespaces", "list_data_items", "search_functions_by_name"
+            ],
+            "Modification tools": [
+                "rename_function", "rename_function_by_address", "add_function_comment",
+                "rename_variable", "set_decompiler_comment", "set_disassembly_comment",
+                "set_function_prototype", "set_local_variable_type"
+            ]
+        }
+        
+        formatted = "Available tools:\n\n"
+        
+        for category, tool_names in categories.items():
+            formatted += f"{category}:\n"
+            for tool_name in tool_names:
+                if tool_name in tools_map:
+                    tool_func = tools_map[tool_name]
+                    # Get the docstring
+                    doc = tool_func.__doc__ or "No description available"
+                    # Get the first line of the docstring
+                    short_desc = doc.strip().split('\n')[0]
+                    formatted += f"- {tool_name}: {short_desc}\n"
+            formatted += "\n"
+        
+        return formatted
     
     def analyze_application(self, task_description: str, system_prompt: Optional[str] = None) -> str:
         """
@@ -127,7 +190,22 @@ class ActionOrchestrator:
         tools_map = self._map_tools_to_functions()
         
         if tool_name not in tools_map:
+            # Generate a list of available tools for the error message
+            available_tools = list(tools_map.keys())
+            
+            # Find similar tool names to suggest alternatives
+            similar_tools = []
+            if tool_name:
+                for available_tool in available_tools:
+                    if tool_name.lower() in available_tool.lower() or available_tool.lower() in tool_name.lower():
+                        similar_tools.append(available_tool)
+            
             error_msg = f"Tool not found: {tool_name}"
+            if similar_tools:
+                error_msg += f"\nSimilar tools you can use: {', '.join(similar_tools)}"
+            else:
+                error_msg += f"\nAvailable tools: {', '.join(sorted(available_tools[:10]))}..."
+                
             logger.error(error_msg)
             self.notify_observers("error", "Tool Execution Error", error_msg)
             return error_msg

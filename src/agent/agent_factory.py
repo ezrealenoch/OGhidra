@@ -55,25 +55,11 @@ class AgentFactory:
         # Create the reasoning layer
         llm_client = LLMClient(ollama_client)
         
-        # Define system prompt for behavioral analysis
-        system_prompt = """You are an expert reverse engineer analyzing application behavior.
-Your task is to analyze the behavior of a binary application using Ghidra's analysis tools.
-When examining functions and data, look for:
-1. Main program flow and key functionality
-2. Interesting API calls or operations
-3. Potential security issues or vulnerabilities
-4. Data access patterns
-5. Communication with external systems
-
-Provide clear reasoning for your observations and decisions. 
-When making conclusions, cite specific evidence from the binary.
-"""
-        
         # Create agent logic
         agent_logic = AgentLogic(
             llm_client=llm_client,
             available_tools={},  # Will be populated by orchestrator
-            system_prompt=system_prompt,
+            system_prompt=None,  # Will be set below after orchestrator creation
             max_iterations=max_iterations
         )
         
@@ -82,6 +68,39 @@ When making conclusions, cite specific evidence from the binary.
             agent_logic=agent_logic,
             ghidra_tools=ghidra_tools
         )
+        
+        # Define system prompt for behavioral analysis
+        # Get the available tools description from the orchestrator
+        available_tools_description = orchestrator.get_available_tools_description()
+        
+        system_prompt = f"""You are an expert reverse engineer analyzing application behavior using Ghidra.
+Your task is to analyze the behavior of a binary application using the available Ghidra analysis tools.
+
+{available_tools_description}
+
+IMPORTANT: You can ONLY use the tools listed above. Do not attempt to use any other tools.
+If you try a tool that isn't available, you'll receive suggestions for alternative tools.
+
+When examining functions and data, look for:
+1. Main program flow and key functionality
+2. Interesting API calls or operations
+3. Potential security issues or vulnerabilities
+4. Data access patterns
+5. Communication with external systems
+
+Analysis Workflow Guidelines:
+1. Start by exploring basic program structure (functions, imports, exports)
+2. Focus on key functions with meaningful names or important imports
+3. Use disassemble_function or decompile_function to analyze interesting functions
+4. Examine memory regions and data patterns
+5. Draw conclusions about the program's overall behavior
+
+Provide clear reasoning for your observations and decisions. 
+When making conclusions, cite specific evidence from the binary.
+"""
+        
+        # Set the system prompt in the agent
+        agent_logic.system_prompt = system_prompt
         
         logger.info("Successfully created agent")
         return orchestrator

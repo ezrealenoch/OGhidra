@@ -76,7 +76,9 @@ Based on the observations so far and the current task, what is the most appropri
 Think through this step by step. Consider what information you already have and what information you still need.
 
 # Next Action
-Given your reasoning, what tool would you like to use next? 
+Given your reasoning, what tool would you like to use next from the available tools list? 
+You MUST pick a tool from the available tools list above.
+
 Provide your response in the following format:
 ```json
 {{
@@ -85,13 +87,14 @@ Provide your response in the following format:
   "reasoning": "Detailed explanation of why this action is appropriate"
 }}
 ```
+
+REMEMBER: Only choose tools from the available list. Provide a proper JSON format with string values properly quoted.
 """
         
         # Generate a response
         response = self.ollama.generate(prompt, system_prompt)
         
         # Extract the JSON from the response
-        # This is a simplified version; in practice, you would need more robust parsing
         import json
         import re
         
@@ -101,24 +104,68 @@ Provide your response in the following format:
         if json_match:
             json_str = json_match.group(1)
             try:
-                return json.loads(json_str)
-            except json.JSONDecodeError:
+                action_data = json.loads(json_str)
+                
+                # Validate the action data
+                if "tool" not in action_data:
+                    raise ValueError("Missing 'tool' field in action data")
+                if action_data["tool"] not in available_tools:
+                    logger.warning(f"Tool '{action_data['tool']}' not in available tools, using default")
+                    action_data["tool"] = available_tools[0]
+                if "parameters" not in action_data:
+                    action_data["parameters"] = {}
+                if "reasoning" not in action_data:
+                    action_data["reasoning"] = "No reasoning provided"
+                
+                return action_data
+            except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse JSON from response: {json_str}")
+                logger.error(f"JSON error: {str(e)}")
+                # Try more aggressive parsing
+                try:
+                    # Try to extract tool name
+                    tool_match = re.search(r'"tool"\s*:\s*"([^"]+)"', json_str)
+                    reasoning_match = re.search(r'"reasoning"\s*:\s*"([^"]+)"', json_str)
+                    
+                    if tool_match and tool_match.group(1) in available_tools:
+                        tool = tool_match.group(1)
+                        reasoning = reasoning_match.group(1) if reasoning_match else "Extracted from malformed JSON"
+                        
+                        logger.info(f"Extracted tool '{tool}' from malformed JSON")
+                        
+                        return {
+                            "tool": tool,
+                            "parameters": {},
+                            "reasoning": reasoning
+                        }
+                except Exception as e2:
+                    logger.error(f"Failed to extract tool from malformed JSON: {str(e2)}")
+                
                 # Return a default action if parsing fails
                 return {
-                    "tool": "get_function_list",
+                    "tool": available_tools[0],
                     "parameters": {},
-                    "reasoning": "Default action due to error in parsing LLM response"
+                    "reasoning": f"Default action due to error in parsing LLM response. Error: {str(e)}"
                 }
         else:
             # If no JSON pattern is found, try to infer the action from the response
             logger.warning("No JSON found in response, attempting to infer action")
             
-            # Default to listing functions if we can't determine a more appropriate action
+            # Try to find mentions of tools in the text
+            for tool in available_tools:
+                if tool in response:
+                    logger.info(f"Inferred tool '{tool}' from response text")
+                    return {
+                        "tool": tool,
+                        "parameters": {},
+                        "reasoning": "Inferred action from non-structured response"
+                    }
+            
+            # Default to first available tool if we can't determine a more appropriate action
             return {
-                "tool": "get_function_list",
+                "tool": available_tools[0],
                 "parameters": {},
-                "reasoning": "Inferred action from non-structured response"
+                "reasoning": "Using default tool since no tool could be inferred from response"
             }
     
     def analyze_application_behavior(self, 
