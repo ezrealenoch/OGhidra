@@ -2,9 +2,13 @@
 
 A Python application that bridges locally hosted AI models (via Ollama) with GhidraMCP for AI-assisted reverse engineering tasks within Ghidra.
 (Authors Note: LOL I asked it to be agentic and it worked. Currently using cogito:32b, its very brief and not wordy so its good at running tools)
+
 ![Screenshot 2025-04-14 155639](https://github.com/user-attachments/assets/f8fb0fb1-6a9c-4097-8e3e-00d87d2d96f4)
 
-Agentic Branch (Were improving):
+
+
+Agentic Branch (We're improving, Using cogito:32B for tool use and Qwen for analysis/summarization):
+
 ![Screenshot 2025-04-14 180605](https://github.com/user-attachments/assets/40da4f4e-ef5a-4f01-b8e1-1051dc15ad92)
 
 ## Architecture
