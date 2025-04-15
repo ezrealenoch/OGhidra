@@ -73,8 +73,11 @@ class Bridge:
         # Planning state
         self.current_plan = None
         
+        # Store partial outputs for building a cohesive final report
+        self.partial_outputs = []
+        
         # Context summarization settings
-        self.context_summarization_threshold = self.config.context_limit * 0.8  # Summarize at 80% of limit
+        self.context_summarization_threshold = self.config.context_limit * 0.8
         self.last_summarization_time = None
         
         if self.include_capabilities and self.capabilities_text:
@@ -210,8 +213,9 @@ class Bridge:
         # Reset plan for new query
         self.current_plan = None
         
-        # Initialize the final response variable
+        # Initialize the final response variable and reset partial outputs
         final_response = ""
+        self.partial_outputs = []
         
         # 1. Planning Phase - Get the AI to create a plan before executing tools
         planning_prompt = self._build_structured_prompt()
@@ -277,6 +281,12 @@ class Bridge:
                 if clean_response.strip():
                     self.context.append({"role": "assistant", "content": clean_response.strip()})
                     final_response = clean_response.strip()
+                    # Store the assistant's reasoning as a partial output
+                    self.partial_outputs.append({
+                        "type": "reasoning",
+                        "content": clean_response.strip(),
+                        "step": step + 1
+                    })
                 
                 # If no commands found, we're done with the tool execution phase
                 if not commands:
@@ -297,6 +307,15 @@ class Bridge:
                     
                     # Add result to context
                     self.context.append({"role": "tool_result", "content": result})
+                    
+                    # Store the tool result as a partial output
+                    self.partial_outputs.append({
+                        "type": "tool_result",
+                        "tool": cmd_name,
+                        "params": cmd_params,
+                        "result": result,
+                        "step": step + 1
+                    })
                 
                 # Update final response with results
                 final_response = clean_response + "\n\n" + "\n".join([result for _, result in all_results])
@@ -367,6 +386,13 @@ class Bridge:
                     self.context.append({"role": "assistant", "content": clean_review.strip()})
                     final_response = clean_review.strip()
                     
+                    # Store the review reasoning as a partial output
+                    self.partial_outputs.append({
+                        "type": "review",
+                        "content": clean_review.strip(),
+                        "review_step": review_step + 1
+                    })
+                    
                     # Check if this response has the final marker
                     if "FINAL RESPONSE:" in clean_review:
                         has_final_response = True
@@ -394,7 +420,14 @@ class Bridge:
                         # Add result to context
                         self.context.append({"role": "tool_result", "content": result})
                         
-                        # Don't override final_response here, just add results to context
+                        # Store the tool result from review as a partial output
+                        self.partial_outputs.append({
+                            "type": "review_tool_result",
+                            "tool": cmd_name,
+                            "params": cmd_params,
+                            "result": result,
+                            "review_step": review_step + 1
+                        })
             
             except Exception as e:
                 error_msg = f"Error in review step {review_step+1}: {str(e)}"
@@ -408,6 +441,9 @@ class Bridge:
         # If we exited the loop without finding a final response marker, just use what we have
         if not has_final_response:
             self.logger.info(f"Reached maximum review rounds ({self.max_review_rounds}) without final response marker")
+            
+            # Generate a cohesive report from partial outputs if no final response marker was found
+            final_response = self._generate_cohesive_report()
             
         return final_response
     
@@ -742,6 +778,96 @@ class Bridge:
                 self.logger.info(f"Tool suggestion: {suggestion}")
                 
         return "\n".join(cleaned_lines), suggestions
+
+    def _generate_cohesive_report(self) -> str:
+        """
+        Generate a cohesive report from partial outputs collected during the agentic process.
+        This combines all reasoning steps and tool results into a structured report.
+        
+        Returns:
+            A cohesive report combining all partial outputs
+        """
+        if not self.partial_outputs:
+            return "No analysis was performed."
+            
+        report_sections = {
+            "findings": [],
+            "analysis": [],
+            "tools": [],
+            "conclusions": []
+        }
+        
+        # Process reasoning outputs (both from main execution and review)
+        for output in self.partial_outputs:
+            if output["type"] in ["reasoning", "review"]:
+                content = output["content"]
+                
+                # Extract findings (usually in list form)
+                if any(marker in content for marker in ["I found:", "Findings:", "Key observations:"]):
+                    for line in content.split('\n'):
+                        if line.strip().startswith('- ') or line.strip().startswith('* '):
+                            report_sections["findings"].append(line.strip())
+                
+                # Extract conclusions
+                if any(marker in content for marker in ["In conclusion", "To summarize", "In summary"]):
+                    conclusion_text = ""
+                    in_conclusion = False
+                    for line in content.split('\n'):
+                        if any(marker in line for marker in ["In conclusion", "To summarize", "In summary"]):
+                            in_conclusion = True
+                        if in_conclusion and line.strip():
+                            conclusion_text += line + "\n"
+                    if conclusion_text:
+                        report_sections["conclusions"].append(conclusion_text.strip())
+                
+                # Extract analysis parts not already captured
+                analysis_content = content
+                # Remove parts that would be in findings or conclusions
+                for finding in report_sections["findings"]:
+                    analysis_content = analysis_content.replace(finding, "")
+                for conclusion in report_sections["conclusions"]:
+                    analysis_content = analysis_content.replace(conclusion, "")
+                
+                if analysis_content.strip():
+                    report_sections["analysis"].append(analysis_content.strip())
+        
+        # Add tool results in chronological order
+        tool_results = []
+        for output in self.partial_outputs:
+            if output["type"] in ["tool_result", "review_tool_result"]:
+                step_info = f"Step {output.get('step', output.get('review_step', '?'))}"
+                tool_info = f"{output['tool']}({', '.join([f'{k}={v}' for k, v in output.get('params', {}).items()])})"
+                result_summary = output['result'].replace("\n", " ")[:100] + "..." if len(output['result']) > 100 else output['result']
+                tool_results.append(f"{step_info}: {tool_info} -> {result_summary}")
+        
+        report_sections["tools"] = tool_results
+        
+        # Build the final report
+        report = "# Analysis Report\n\n"
+        
+        if report_sections["findings"]:
+            report += "## Key Findings\n"
+            for finding in report_sections["findings"]:
+                report += f"{finding}\n"
+            report += "\n"
+        
+        if report_sections["analysis"]:
+            report += "## Analysis\n"
+            for analysis in report_sections["analysis"]:
+                report += f"{analysis}\n\n"
+        
+        if report_sections["tools"]:
+            report += "## Tools Used\n"
+            for tool in report_sections["tools"]:
+                report += f"- {tool}\n"
+            report += "\n"
+        
+        if report_sections["conclusions"]:
+            report += "## Conclusions\n"
+            for conclusion in report_sections["conclusions"]:
+                report += f"{conclusion}\n"
+        
+        return report
 
 def main():
     """Main entry point for the bridge application."""
