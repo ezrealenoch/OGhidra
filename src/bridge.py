@@ -203,6 +203,11 @@ class Bridge:
         Returns:
             The processed response with command results
         """
+        # Check if this is a summarization task before starting
+        is_summary_task = self._is_summarization_task(query)
+        if is_summary_task:
+            self.logger.info("Detected summarization/report task in query")
+        
         # Add the query to context
         self.context.append({"role": "user", "content": query})
         
@@ -666,6 +671,7 @@ class Bridge:
     def _summarize_context(self) -> None:
         """
         Summarize the conversation context to preserve key information while reducing length.
+        Uses the specialized summarization model if configured.
         """
         if len(self.context) <= 5:  # Don't summarize very short contexts
             return
@@ -696,9 +702,12 @@ class Bridge:
         summarization_prompt = f"{context_text}\n\n{summarization_instruction}"
         
         try:
-            # Ask the LLM to summarize
+            # Ask the LLM to summarize using the specialized model
             self.logger.info("Summarizing conversation context")
-            summary = self.ollama.generate(summarization_prompt, "You are a helpful assistant tasked with summarizing technical conversations about reverse engineering.")
+            summary = self.ollama.generate_with_summarization_model(
+                summarization_prompt, 
+                "You are a helpful assistant tasked with summarizing technical conversations about reverse engineering."
+            )
             
             # Replace the old context items with the new summary
             # Keep all special entries (plans, etc.) but remove regular conversation
@@ -805,6 +814,7 @@ class Bridge:
         """
         Generate a cohesive report from partial outputs collected during the agentic process.
         This combines all reasoning steps, planning, tool results, and errors into a structured report.
+        Uses a specialized summarization model if configured.
         
         Returns:
             A cohesive report combining all partial outputs
@@ -812,6 +822,7 @@ class Bridge:
         if not self.partial_outputs:
             return "No analysis was performed or captured."
             
+        # Organize our partial outputs into sections for the report
         report_sections = {
             "plan": [],              # Added section for the initial plan
             "findings": [],
@@ -954,7 +965,42 @@ class Bridge:
                 # Keep order, filter duplicates (case-insensitive for strings)
                 report_sections[section] = [x for x in report_sections[section] if not ( (x.lower() if isinstance(x, str) else x) in seen or seen.add( (x.lower() if isinstance(x, str) else x) ) )]
         
-        # --- Build the Final Report String --- 
+        # Option 1: Build a structured report manually
+        report = self._build_structured_report(report_sections)
+        
+        # Option 2: Use a specialized summarization model to generate the report
+        if self.config.ollama.summarization_model:
+            try:
+                # Prepare the input for the summarization model by converting our report_sections to text
+                summarization_input = self._prepare_summarization_input(report_sections)
+                
+                self.logger.info("Generating comprehensive report using specialized summarization model")
+                ai_generated_report = self.ollama.generate_with_summarization_model(summarization_input)
+                
+                # If the AI-generated report is too short or empty, fall back to our structured report
+                if len(ai_generated_report.strip()) < 100:
+                    self.logger.warning("AI-generated report was too short, using structured report instead")
+                    return report
+                
+                return ai_generated_report
+            except Exception as e:
+                self.logger.error(f"Error generating report with summarization model: {str(e)}")
+                # Fall back to structured report on error
+                return report
+        
+        # Return the manually structured report if no specialized model
+        return report
+        
+    def _build_structured_report(self, report_sections):
+        """
+        Build a structured report from the collected sections.
+        
+        Args:
+            report_sections: Dict of report sections
+            
+        Returns:
+            A formatted report string
+        """
         report = "# Analysis Report\n\n"
         
         if report_sections["plan"]:
@@ -986,6 +1032,85 @@ class Bridge:
             report += "\n".join(report_sections["conclusions"]) + "\n"
         
         return report.strip()
+    
+    def _prepare_summarization_input(self, report_sections):
+        """
+        Prepare the input for the summarization model by converting our report sections to text.
+        
+        Args:
+            report_sections: Dict of report sections
+            
+        Returns:
+            A formatted string to send to the summarization model
+        """
+        input_parts = []
+        
+        input_parts.append("# Analysis Information\n")
+        input_parts.append("Please generate a comprehensive analysis report based on the following information:\n")
+        
+        if report_sections["plan"]:
+            input_parts.append("\n## Initial Plan:\n")
+            for plan in report_sections["plan"]:
+                input_parts.append(plan)
+        
+        if report_sections["insights"]:
+            input_parts.append("\n## Key Insights Found:\n")
+            for idx, insight in enumerate(report_sections["insights"], 1):
+                input_parts.append(f"{idx}. {insight}")
+        
+        if report_sections["findings"]:
+            input_parts.append("\n## Findings:\n")
+            for finding in report_sections["findings"]:
+                input_parts.append(f"- {finding}")
+        
+        if report_sections["analysis"]:
+            input_parts.append("\n## Technical Analysis Details:\n")
+            for analysis in report_sections["analysis"]:
+                input_parts.append(analysis + "\n")
+        
+        if report_sections["tools"]:
+            input_parts.append("\n## Tools Used:\n")
+            for tool in report_sections["tools"]:
+                input_parts.append(f"- {tool}")
+        
+        if report_sections["errors"]:
+            input_parts.append("\n## Errors Encountered:\n")
+            for error in report_sections["errors"]:
+                input_parts.append(f"- {error}")
+        
+        if report_sections["conclusions"]:
+            input_parts.append("\n## Preliminary Conclusions:\n")
+            for conclusion in report_sections["conclusions"]:
+                input_parts.append(conclusion)
+                
+        input_parts.append("\n# Report Format Request:\n")
+        input_parts.append("Please organize this information into a well-structured analysis report with clear sections.")
+        input_parts.append("Include an executive summary at the beginning and a conclusion at the end.")
+        input_parts.append("Format your response using Markdown, with appropriate headers, bullet points, and emphasis.")
+        
+        return "\n".join(input_parts)
+
+    def _is_summarization_task(self, query: str) -> bool:
+        """
+        Detect if the query is asking for a summarization or report.
+        
+        Args:
+            query: The user's query
+            
+        Returns:
+            True if the query appears to be requesting a summary or report
+        """
+        # Look for keywords that indicate a summarization task
+        summarization_keywords = [
+            "summarize", "summarization", "summary",
+            "report", "overview", 
+            "analyze the results", "final analysis",
+            "produce a report", "generate a report",
+            "compile", "findings", "conclude",
+        ]
+        
+        query_lower = query.lower()
+        return any(keyword in query_lower for keyword in summarization_keywords)
 
 def main():
     """Main entry point for the bridge application."""
@@ -993,6 +1118,7 @@ def main():
     parser.add_argument("--ollama-url", help="Ollama server URL")
     parser.add_argument("--ghidra-url", help="GhidraMCP server URL")
     parser.add_argument("--model", help="Ollama model to use")
+    parser.add_argument("--summarization-model", help="Specialized model to use for summarization and report generation (defaults to main model if not specified)")
     parser.add_argument("--interactive", action="store_true", help="Run in interactive mode")
     parser.add_argument("--health-check", action="store_true", help="Check health of services and exit")
     parser.add_argument("--mock", action="store_true", help="Run in mock mode (no GhidraMCP server needed)")
@@ -1014,6 +1140,8 @@ def main():
         config.ghidra.base_url = args.ghidra_url
     if args.model:
         config.ollama.model = args.model
+    if args.summarization_model:
+        config.ollama.summarization_model = args.summarization_model
     if args.mock:
         config.ghidra.mock_mode = True
         print("Running in MOCK mode - No GhidraMCP server required")
@@ -1035,9 +1163,11 @@ def main():
     if args.interactive:
         print("Ollama-GhidraMCP Bridge (Interactive Mode)")
         print(f"Using model: {config.ollama.model}")
+        if config.ollama.summarization_model:
+            print(f"Using summarization model: {config.ollama.summarization_model}")
         print(f"Capabilities included: {'Yes' if args.include_capabilities else 'No'}")
         print(f"Tool execution steps: {bridge.max_agent_steps}")
-        print(f"Review rounds: {args.max_review_rounds if hasattr(bridge, 'max_review_rounds') else 3}")
+        print(f"Review rounds: {bridge.max_review_rounds}")
         print("Type 'exit' or 'quit' to exit")
         
         while True:

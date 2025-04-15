@@ -26,6 +26,8 @@ class OllamaClient:
         self.api_url = f"{config.base_url}/api/generate"
         self.client = httpx.Client(timeout=config.timeout)
         logger.info(f"Initialized Ollama client with model: {config.model}")
+        if self.config.summarization_model:
+            logger.info(f"Using specialized model for summarization: {config.summarization_model}")
     
     def generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         """
@@ -41,8 +43,47 @@ class OllamaClient:
         Raises:
             Exception: If the request fails
         """
+        return self._generate_with_model(self.config.model, prompt, system_prompt)
+        
+    def generate_with_summarization_model(self, prompt: str, system_prompt: Optional[str] = None) -> str:
+        """
+        Send a prompt to the summarization model and get a response.
+        If no summarization model is configured, falls back to the main model.
+        
+        Args:
+            prompt: The user prompt to send to the model
+            system_prompt: Optional system prompt to guide the model
+            
+        Returns:
+            The model's response as a string
+            
+        Raises:
+            Exception: If the request fails
+        """
+        model = self.config.summarization_model if self.config.summarization_model else self.config.model
+        if system_prompt is None and self.config.summarization_model:
+            system_prompt = self.config.summarization_system_prompt
+            
+        logger.info(f"Using {'specialized summarization' if model != self.config.model else 'default'} model: {model}")
+        return self._generate_with_model(model, prompt, system_prompt)
+    
+    def _generate_with_model(self, model: str, prompt: str, system_prompt: Optional[str] = None) -> str:
+        """
+        Internal method to send a prompt to a specific Ollama model and get a response.
+        
+        Args:
+            model: The specific model to use
+            prompt: The user prompt to send to the model
+            system_prompt: Optional system prompt to guide the model
+            
+        Returns:
+            The model's response as a string
+            
+        Raises:
+            Exception: If the request fails
+        """
         payload = {
-            "model": self.config.model,
+            "model": model,
             "prompt": prompt,
             "stream": False  # Explicitly disable streaming to get a single JSON response
         }
@@ -51,7 +92,7 @@ class OllamaClient:
             payload["system"] = system_prompt
         
         try:
-            logger.debug(f"Sending prompt to Ollama: {prompt[:100]}...")
+            logger.debug(f"Sending prompt to Ollama model '{model}': {prompt[:100]}...")
             response = self.client.post(self.api_url, json=payload)
             response.raise_for_status()
             

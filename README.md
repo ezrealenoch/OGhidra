@@ -19,6 +19,7 @@ This bridge connects the following components:
 - **Context Management**: Maintains conversation context for multi-step analyses
 - **Interactive Mode**: Command-line interface for interactive sessions
 - **Health Checks**: Verify connectivity to Ollama and GhidraMCP services
+- **Specialized Summarization Model**: Use a separate model optimized for generating comprehensive reports
 
 ## Requirements
 
@@ -59,6 +60,31 @@ python main.py --interactive
 Special commands:
 - Type `exit` or `quit` to exit
 - Type `health` to check connectivity to Ollama and GhidraMCP
+
+### Using the Specialized Summarization Model
+
+You can configure a separate model specifically for summarization and report generation tasks:
+
+```bash
+python main.py --interactive --model llama3 --summarization-model mixtral:8x7b
+```
+
+The summarization model will be used for:
+1. Generating final reports when analysis is complete
+2. Summarizing long conversation contexts
+3. Processing queries that specifically ask for summaries or reports
+
+You can also set this in your `.env` file:
+```
+OLLAMA_MODEL=llama3
+OLLAMA_SUMMARIZATION_MODEL=mixtral:8x7b
+```
+
+This is particularly useful when you want to use:
+- A lightweight model for interactive analysis and tool execution
+- A more powerful model for creating comprehensive, well-structured reports
+
+The system automatically detects summarization/report requests by looking for keywords like "summarize", "report", "analyze the results", etc.
 
 ### Mock Mode
 

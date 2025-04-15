@@ -11,6 +11,7 @@ class OllamaConfig:
     """Configuration for the Ollama client."""
     base_url: str = "http://localhost:11434"
     model: str = "llama3"
+    summarization_model: str = ""  # Empty string means use the main model
     timeout: int = 120  # Timeout for requests in seconds
     
     # System prompt for guiding the AI's responses
@@ -51,6 +52,21 @@ class OllamaConfig:
     EXECUTE: list_functions()
     EXECUTE: disassemble_function(address="0x1000")
     """
+    
+    # System prompt specifically for summarization tasks
+    summarization_system_prompt: str = """
+    You are a specialized AI assistant for summarizing and organizing technical information about reverse engineering and binary analysis. 
+    Your task is to create a comprehensive, well-structured report based on the information provided.
+    
+    Focus on:
+    1. Extracting key insights and findings
+    2. Organizing information logically
+    3. Highlighting important technical details about functions, memory, and program behavior
+    4. Summarizing the overall purpose and behavior of the analyzed binary
+    5. Providing clear conclusions
+    
+    Format your response as a structured report with clearly delineated sections using Markdown.
+    """
 
 @dataclass
 class GhidraMCPConfig:
@@ -83,6 +99,7 @@ class BridgeConfig:
             ollama=OllamaConfig(
                 base_url=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
                 model=os.environ.get("OLLAMA_MODEL", "llama3"),
+                summarization_model=os.environ.get("OLLAMA_SUMMARIZATION_MODEL", ""),  # Default to empty (use main model)
                 timeout=int(os.environ.get("OLLAMA_TIMEOUT", "120")),
             ),
             ghidra=GhidraMCPConfig(
