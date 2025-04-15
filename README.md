@@ -12,6 +12,7 @@ This bridge connects the following components:
 - **Ollama Server**: Hosts local AI models (e.g., LLaMA 3, Mistral) accessible via REST API
 - **Bridge Application**: This Python application that serves as an intermediary
 - **GhidraMCP Server**: Exposes Ghidra's functionalities via MCP
+- **Agentic AI System**: Autonomous agent for application behavior analysis (new!)
 
 ## Features
 
@@ -19,6 +20,7 @@ This bridge connects the following components:
 - **Context Management**: Maintains conversation context for multi-step analyses
 - **Interactive Mode**: Command-line interface for interactive sessions
 - **Health Checks**: Verify connectivity to Ollama and GhidraMCP services
+- **Agentic Analysis**: Autonomous agent for analyzing application behavior (new!)
 
 ## Requirements
 
@@ -48,12 +50,12 @@ This bridge connects the following components:
 
 ## Usage
 
-### Interactive Mode
+### Interactive Bridge Mode
 
 Run the bridge in interactive mode:
 
 ```bash
-python main.py --interactive
+python main.py bridge --interactive
 ```
 
 Special commands:
@@ -65,7 +67,7 @@ Special commands:
 If you don't have a GhidraMCP server running or want to test the bridge functionality, you can use mock mode:
 
 ```bash
-python main.py --interactive --mock
+python main.py bridge --interactive --mock
 ```
 
 In mock mode, the bridge simulates GhidraMCP responses without contacting the actual server.
@@ -75,8 +77,24 @@ In mock mode, the bridge simulates GhidraMCP responses without contacting the ac
 Process a single query:
 
 ```bash
-echo "What functions are in this binary?" | python main.py
+echo "What functions are in this binary?" | python main.py bridge
 ```
+
+### Agentic Analysis (New!)
+
+The new agentic AI system can autonomously analyze application behavior:
+
+```bash
+python main.py agent --analyze --task "Analyze the behavior of this application" --iterations 15 --verbose
+```
+
+Options:
+- `--analyze`: Run the analysis process
+- `--task`: Description of the analysis task
+- `--iterations`: Maximum number of iterations for the agent (default: 15)
+- `--verbose`: Print detailed progress information
+
+The agent will analyze the application following a Thought-Action-Observation loop and produce a comprehensive report detailing the application's behavior.
 
 ### Configuration Options
 
@@ -85,7 +103,7 @@ You can configure the bridge through:
 1. Environment variables (see `.env.example`)
 2. Command line arguments:
    ```bash
-   python main.py --ollama-url http://localhost:11434 --ghidra-url http://localhost:8080 --model llama3 --interactive
+   python main.py bridge --ollama-url http://localhost:11434 --ghidra-url http://localhost:8080 --model llama3 --interactive
    ```
 
 ## Troubleshooting

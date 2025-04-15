@@ -441,20 +441,62 @@ class Bridge:
 def main():
     """Main entry point for the bridge application."""
     parser = argparse.ArgumentParser(description="Ollama-GhidraMCP Bridge")
-    parser.add_argument("--ollama-url", help="Ollama server URL")
-    parser.add_argument("--ghidra-url", help="GhidraMCP server URL")
-    parser.add_argument("--model", help="Ollama model to use")
-    parser.add_argument("--interactive", action="store_true", help="Run in interactive mode")
-    parser.add_argument("--health-check", action="store_true", help="Check health of services and exit")
-    parser.add_argument("--mock", action="store_true", help="Run in mock mode (no GhidraMCP server needed)")
-    parser.add_argument("--include-capabilities", action="store_true", 
+    subparsers = parser.add_subparsers(dest="command", help="Command to run")
+    
+    # Bridge command (default)
+    bridge_parser = subparsers.add_parser("bridge", help="Run the standard bridge")
+    bridge_parser.add_argument("--ollama-url", help="Ollama server URL")
+    bridge_parser.add_argument("--ghidra-url", help="GhidraMCP server URL")
+    bridge_parser.add_argument("--model", help="Ollama model to use")
+    bridge_parser.add_argument("--interactive", action="store_true", help="Run in interactive mode")
+    bridge_parser.add_argument("--health-check", action="store_true", help="Check health of services and exit")
+    bridge_parser.add_argument("--mock", action="store_true", help="Run in mock mode (no GhidraMCP server needed)")
+    bridge_parser.add_argument("--include-capabilities", action="store_true", 
                         help="Include capabilities context from ai_ghidra_capabilities.txt in prompts")
-    parser.add_argument("--max-steps", type=int, default=5, 
+    bridge_parser.add_argument("--max-steps", type=int, default=5, 
                         help="Maximum number of steps for agentic execution loop (default: 5)")
-    parser.add_argument("--max-review-rounds", type=int, default=3,
+    bridge_parser.add_argument("--max-review-rounds", type=int, default=3,
                         help="Maximum number of review rounds after tool execution (default: 3)")
+    bridge_parser.set_defaults(func=run_bridge)
+    
+    # Load config from environment variables
+    config = BridgeConfig.from_env()
+    
+    # Add agent command
+    try:
+        from src.agent.cli_handler import AgentCLIHandler
+        agent_handler = AgentCLIHandler(config)
+        agent_handler.setup_parser(subparsers)
+    except ImportError as e:
+        print(f"Warning: Agent module not available: {str(e)}")
+    
     args = parser.parse_args()
     
+    # If no command is specified, default to bridge
+    if not hasattr(args, 'func'):
+        if args.command is None:
+            args.func = run_bridge
+            args.command = 'bridge'
+        else:
+            parser.print_help()
+            return 1
+    
+    # Override config with command line arguments if needed
+    if hasattr(args, 'ollama_url') and args.ollama_url:
+        config.ollama.base_url = args.ollama_url
+    if hasattr(args, 'ghidra_url') and args.ghidra_url:
+        config.ghidra.base_url = args.ghidra_url
+    if hasattr(args, 'model') and args.model:
+        config.ollama.model = args.model
+    if hasattr(args, 'mock') and args.mock:
+        config.ghidra.mock_mode = True
+        print("Running in MOCK mode - No GhidraMCP server required")
+    
+    # Run the appropriate command
+    return args.func(args)
+    
+def run_bridge(args):
+    """Run the bridge command."""
     # Load config from environment variables
     config = BridgeConfig.from_env()
     
@@ -518,6 +560,8 @@ def main():
         query = sys.stdin.read().strip()
         response = bridge.process_query(query)
         print(response)
+    
+    return 0
 
 if __name__ == "__main__":
     main() 
