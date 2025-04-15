@@ -7,14 +7,16 @@ A Python application that bridges locally hosted AI models (via Ollama) with Ghi
 
 ## Architecture
 
-Agentic Design
-![architecture-diagram-perfect-final-revised](https://github.com/user-attachments/assets/5dccb3f7-3ab9-4824-96ea-468b0d774b9b)
+
 This bridge connects the following components:
 
 - **Ollama Server**: Hosts local AI models (e.g., LLaMA 3, Mistral) accessible via REST API
 - **Bridge Application**: This Python application that serves as an intermediary
 - **GhidraMCP Server**: Exposes Ghidra's functionalities via MCP
 - **Agentic AI System**: Autonomous agent for application behavior analysis (new!)
+
+![architecture-diagram-perfect-final-revised](https://github.com/user-attachments/assets/5dccb3f7-3ab9-4824-96ea-468b0d774b9b)
+
 
 ## Features
 
