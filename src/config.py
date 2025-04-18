@@ -4,7 +4,7 @@ Configuration module for the Ollama-GhidraMCP Bridge.
 
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Dict, Any
 
 @dataclass
 class OllamaConfig:
@@ -13,6 +13,17 @@ class OllamaConfig:
     model: str = "llama3"
     summarization_model: str = ""  # Empty string means use the main model
     timeout: int = 120  # Timeout for requests in seconds
+    
+    # NEW: Model map for different phases of the agentic loop
+    # If a phase is not in the map or the value is empty, the default model will be used
+    model_map: Dict[str, str] = field(default_factory=lambda: {
+        "planning": "",       # Model for planning phase 
+        "execution": "",      # Model for execution phase
+        "review": "",         # Model for review phase
+        "summarization": "",  # Model for context summarization (if not specified, use summarization_model)
+        "verification": "",   # Model for verification phase
+        "learning": ""        # Model for learning phase
+    })
     
     # System prompt for guiding the AI's responses
     default_system_prompt: str = """
@@ -67,6 +78,15 @@ class OllamaConfig:
     
     Format your response as a structured report with clearly delineated sections using Markdown.
     """
+    
+    # NEW: System prompts for different phases
+    phase_system_prompts: Dict[str, str] = field(default_factory=lambda: {
+        "planning": "",  # If empty, use default_system_prompt
+        "execution": "",
+        "review": "",
+        "verification": "",
+        "learning": ""
+    })
 
 @dataclass
 class GhidraMCPConfig:
@@ -95,13 +115,38 @@ class BridgeConfig:
     @classmethod
     def from_env(cls) -> 'BridgeConfig':
         """Create a configuration from environment variables."""
+        # Create base Ollama config with core settings
+        ollama_config = OllamaConfig(
+            base_url=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
+            model=os.environ.get("OLLAMA_MODEL", "llama3"),
+            summarization_model=os.environ.get("OLLAMA_SUMMARIZATION_MODEL", ""),
+            timeout=int(os.environ.get("OLLAMA_TIMEOUT", "120")),
+        )
+        
+        # Set up model map from environment variables
+        model_map = {}
+        for phase in ["planning", "execution", "review", "summarization", "verification", "learning"]:
+            env_var = f"OLLAMA_MODEL_{phase.upper()}"
+            if env_var in os.environ:
+                model_map[phase] = os.environ[env_var]
+        
+        # Only set if any values were defined
+        if model_map:
+            ollama_config.model_map = model_map
+            
+        # Set up system prompts for different phases from environment variables
+        phase_prompts = {}
+        for phase in ["planning", "execution", "review", "verification", "learning"]:
+            env_var = f"OLLAMA_SYSTEM_PROMPT_{phase.upper()}"
+            if env_var in os.environ:
+                phase_prompts[phase] = os.environ[env_var]
+                
+        # Only set if any values were defined
+        if phase_prompts:
+            ollama_config.phase_system_prompts = phase_prompts
+        
         return cls(
-            ollama=OllamaConfig(
-                base_url=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
-                model=os.environ.get("OLLAMA_MODEL", "llama3"),
-                summarization_model=os.environ.get("OLLAMA_SUMMARIZATION_MODEL", ""),  # Default to empty (use main model)
-                timeout=int(os.environ.get("OLLAMA_TIMEOUT", "120")),
-            ),
+            ollama=ollama_config,
             ghidra=GhidraMCPConfig(
                 base_url=os.environ.get("GHIDRA_MCP_URL", "http://localhost:8080"),
                 timeout=int(os.environ.get("GHIDRA_MCP_TIMEOUT", "30")),

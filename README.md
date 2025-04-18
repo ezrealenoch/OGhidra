@@ -20,6 +20,8 @@ This bridge connects the following components:
 - **Interactive Mode**: Command-line interface for interactive sessions
 - **Health Checks**: Verify connectivity to Ollama and GhidraMCP services
 - **Specialized Summarization Model**: Use a separate model optimized for generating comprehensive reports
+- **Model Switching**: Use different models for different phases of the agentic loop
+- **Agentic Capabilities**: Multi-step reasoning with planning, execution, review, and learning phases
 
 ## Requirements
 
@@ -60,6 +62,31 @@ python main.py --interactive
 Special commands:
 - Type `exit` or `quit` to exit
 - Type `health` to check connectivity to Ollama and GhidraMCP
+- Type `models` to list available Ollama models
+
+### Model Switching for Agentic Loop
+
+You can now use different models for different phases of the agentic reasoning loop. This allows you to optimize the use of models based on their strengths:
+
+```bash
+python main.py --interactive --model llama3 --planning-model llama3 --execution-model codellama:7b
+```
+
+Available phase-specific models:
+- `--planning-model`: Model for the planning phase (creating analysis plans)
+- `--execution-model`: Model for the execution phase (running tools)
+- `--review-model`: Model for the review phase (evaluating results)
+- `--verification-model`: Model for the verification phase
+- `--learning-model`: Model for the learning phase
+- `--summarization-model`: Model for summarization tasks
+
+You can also configure these via environment variables:
+```
+OLLAMA_MODEL_PLANNING=llama3
+OLLAMA_MODEL_EXECUTION=codellama:7b
+```
+
+For more detailed information about model switching, see [README-MODEL-SWITCHING.md](README-MODEL-SWITCHING.md).
 
 ### Using the Specialized Summarization Model
 

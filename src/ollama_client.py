@@ -28,6 +28,11 @@ class OllamaClient:
         logger.info(f"Initialized Ollama client with model: {config.model}")
         if self.config.summarization_model:
             logger.info(f"Using specialized model for summarization: {config.summarization_model}")
+        
+        # Log any phase-specific models that are configured
+        for phase, model in self.config.model_map.items():
+            if model:
+                logger.info(f"Using specialized model for {phase} phase: {model}")
     
     def generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         """
@@ -44,6 +49,45 @@ class OllamaClient:
             Exception: If the request fails
         """
         return self._generate_with_model(self.config.model, prompt, system_prompt)
+    
+    def generate_for_phase(self, phase: str, prompt: str, system_prompt: Optional[str] = None) -> str:
+        """
+        Send a prompt to a phase-specific Ollama model and get a response.
+        If no model is specified for the phase, uses the default model.
+        
+        Args:
+            phase: The phase of processing (planning, execution, review, etc.)
+            prompt: The user prompt to send to the model
+            system_prompt: Optional system prompt to guide the model
+            
+        Returns:
+            The model's response as a string
+            
+        Raises:
+            Exception: If the request fails
+        """
+        # Determine which model to use for this phase
+        model = self.config.model  # Default model
+        
+        # Check if we have a specific model for this phase
+        if phase in self.config.model_map and self.config.model_map[phase]:
+            model = self.config.model_map[phase]
+            logger.info(f"Using phase-specific model for {phase}: {model}")
+        
+        # Check if we have a specific system prompt for this phase
+        if system_prompt is None and phase in self.config.phase_system_prompts and self.config.phase_system_prompts[phase]:
+            system_prompt = self.config.phase_system_prompts[phase]
+            logger.info(f"Using phase-specific system prompt for {phase}")
+        
+        # Special case for summarization
+        if phase == "summarization" and not self.config.model_map.get("summarization") and self.config.summarization_model:
+            model = self.config.summarization_model
+            logger.info(f"Using summarization model for summarization phase: {model}")
+            if system_prompt is None:
+                system_prompt = self.config.summarization_system_prompt
+                logger.info("Using summarization system prompt")
+        
+        return self._generate_with_model(model, prompt, system_prompt)
         
     def generate_with_summarization_model(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         """

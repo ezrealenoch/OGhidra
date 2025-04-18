@@ -116,10 +116,14 @@ class Bridge:
             self.logger.error(f"Error reading capabilities file '{capabilities_file}': {str(e)}")
             return None
 
-    def _build_structured_prompt(self) -> str:
+    def _build_structured_prompt(self, phase: str = None) -> str:
         """
-        Build a structured prompt with clear sections for capabilities, history, and current task.
+        Build a structured prompt with clear sections for capabilities, history, current task,
+        and phase-specific guidance.
         
+        Args:
+            phase: Optional phase name to customize the prompt
+            
         Returns:
             A structured prompt string with labeled sections
         """
@@ -186,8 +190,30 @@ class Bridge:
             "---\n\n"
         )
         
+        # Add phase-specific sections
+        if phase == "context_assessment":
+            full_prompt = (
+                "## Context Assessment Phase:\n"
+                "Analyze the available information about the binary/program. Identify key areas of interest, "
+                "complexity points, and potential challenges. Focus on building a high-level understanding.\n"
+                "Please provide:\n"
+                "1. An overview of what you can determine about the program\n"
+                "2. Key areas that should be investigated\n"
+                "3. Potential challenges in analysis\n"
+                "4. Recommended approach based on available information\n"
+            )
+        elif phase == "tool_selection":
+            full_prompt += (
+                "## Tool Selection Phase:\n"
+                "Based on the plan, identify the specific Ghidra tools needed to accomplish each step.\n"
+                "For each planned step, specify:\n"
+                "1. The exact tool command(s) that will be needed\n"
+                "2. Any parameters or options that should be specified\n"
+                "3. Alternative tools if the primary tool encounters issues\n"
+            )
+        
         # Create the full prompt
-        full_prompt = capabilities_section + state_section + plan_section + history_section + instructions_section
+        full_prompt = capabilities_section + state_section + plan_section + history_section + instructions_section + full_prompt
         
         # Add final response request based on the last message
         if self.context and self.context[-1]["role"] == "user":
@@ -370,8 +396,7 @@ class Bridge:
 
     def process_query(self, query: str) -> str:
         """
-        Process a natural language query through the AI and execute commands on GhidraMCP,
-        with optional multi-step agentic reasoning.
+        Process a natural language query through the AI with an enhanced agentic loop.
         
         Args:
             query: The user's query
@@ -391,54 +416,139 @@ class Bridge:
         if self._should_summarize_context():
             self._summarize_context()
         
-        # Reset plan for new query
+        # Initialize state for this query
         self.current_plan = None
-        
-        # Initialize the final response variable and reset partial outputs
+        self.planned_tools_tracker = {
+            'planned': [], 'executed': [], 'pending_critical': []
+        }
         final_response = ""
         self.partial_outputs = []
         
-        # 1. Planning Phase - Get the AI to create a plan before executing tools
-        planning_prompt = self._build_structured_prompt()
-        self.logger.info("Starting planning phase")
+        # 1. Initial Context Assessment Phase
+        # This phase analyzes available information and sets the scope
+        context_assessment_result = self._run_context_assessment_phase()
+        if self._check_for_clarification_request(context_assessment_result):
+            return context_assessment_result
+        
+        # 2. Planning Phase - Now with context assessment information
+        planning_result = self._run_planning_phase(context_assessment_result)
+        if self._check_for_clarification_request(planning_result):
+            return planning_result
+        
+        # 3. Tool Selection Phase - Identify tools needed for the task
+        tool_selection_result = self._run_tool_selection_phase()
+        if self._check_for_clarification_request(tool_selection_result):
+            return tool_selection_result
+        
+        # 4. Primary Execution Loop - Execute tools with the selected models
+        execution_result = self._run_execution_phase()
+        if isinstance(execution_result, str) and execution_result:
+            # If it's a clarification request or error
+            return execution_result
+        
+        # 5. Verification Phase - Verify results against expectations
+        verification_result = self._run_verification_phase()
+        
+        # 6. Review and Reasoning Phase - Evaluate completeness
+        review_result = self._run_review_phase(verification_result)
+        if isinstance(review_result, str) and review_result:
+            final_response = review_result
+        
+        # 7. Learning/Adaptation Phase - Only run on successful completions
+        if not tool_errors_encountered:
+            self._run_learning_phase(final_response)
+        
+        return final_response
+    
+    def _run_context_assessment_phase(self) -> str:
+        """Run the initial context assessment phase to analyze available information."""
+        self.logger.info("Starting context assessment phase")
+        
+        # Build a prompt specifically for context assessment
+        assessment_prompt = self._build_structured_prompt(phase="context_assessment")
         
         try:
-            # Get AI to create a plan
-            plan_response = self.ollama.generate(planning_prompt, self.config.ollama.default_system_prompt)
-            self.logger.info(f"Received planning response: {plan_response[:100]}...")
+            # Generate the context assessment using the specific model for this phase
+            assessment_response = self.ollama.generate_for_phase(
+                "context_assessment", assessment_prompt
+            )
+            self.logger.info(f"Received context assessment: {assessment_response[:100]}...")
             
-            # Check if this is a clarification request
-            if self._check_for_clarification_request(plan_response):
-                self.logger.info("AI is requesting clarification from user")
-                return plan_response  # Return the question directly to the user
-                
-            # Extract any tool suggestions
-            plan_response, suggestions = self._extract_suggestions(plan_response)
+            # Store the assessment in the context
+            self.context.append({"role": "context_assessment", "content": assessment_response})
             
-            # Extract planned tools from the plan
-            self._extract_planned_tools(plan_response)
-            
-            # Store the plan in the context and the state
-            self.current_plan = plan_response
-            self.context.append({"role": "plan", "content": plan_response})
-            
-            # Store planning phase output
+            # Store in partial outputs for reporting
             self.partial_outputs.append({
-                "type": "planning", 
-                "content": plan_response,
-                "phase": "planning"
+                "type": "context_assessment",
+                "content": assessment_response,
+                "phase": "context_assessment"
             })
             
-            self.logger.info("Planning phase completed")
-            
+            return assessment_response
         except Exception as e:
-            error_msg = f"Error in planning phase: {str(e)}"
+            error_msg = f"Error in context assessment phase: {str(e)}"
             self.logger.error(error_msg)
-            # Continue without a plan if it fails
-            self.logger.info("Continuing without a plan due to error")
+            return ""  # Return empty string to continue with planning phase
+
+    def _run_planning_phase(self, context_assessment_result: str) -> str:
+        """Run the planning phase with context assessment information."""
+        self.logger.info("Starting planning phase")
+        
+        # Build a plan based on the context assessment result
+        plan_text = f"Based on the context assessment, the plan is to: {context_assessment_result}"
+        
+        # Extract planned tools from the plan
+        self._extract_planned_tools(plan_text)
+        
+        # Store the plan in the context and the state
+        self.current_plan = plan_text
+        self.context.append({"role": "plan", "content": plan_text})
+        
+        # Store planning phase output
+        self.partial_outputs.append({
+            "type": "planning", 
+            "content": plan_text,
+            "phase": "planning"
+        })
+        
+        self.logger.info("Planning phase completed")
+        
+        return plan_text
+
+    def _run_tool_selection_phase(self) -> str:
+        """Run the tool selection phase to identify specific tools needed for the task."""
+        self.logger.info("Starting tool selection phase")
+        
+        # Build a tool selection prompt
+        tool_selection_prompt = self._build_structured_prompt(phase="tool_selection")
+        
+        try:
+            # Get AI to select tools
+            tool_selection_response = self.ollama.generate_for_phase(
+                "tool_selection", tool_selection_prompt
+            )
+            self.logger.info(f"Received tool selection response: {tool_selection_response[:100]}...")
             
-        # 2. Primary agentic execution loop - allows multiple steps of reasoning with tools
-        self.logger.info("Starting tool execution phase")
+            # Extract tool suggestions
+            tool_selection_response, suggestions = self._extract_suggestions(tool_selection_response)
+            
+            # Extract planned tools from the response
+            self._extract_planned_tools(tool_selection_response)
+            
+            # Store the tool selection result in the context
+            self.context.append({"role": "tool_selection", "content": tool_selection_response})
+            
+            self.logger.info("Tool selection phase completed")
+            
+            return tool_selection_response
+        except Exception as e:
+            error_msg = f"Error in tool selection phase: {str(e)}"
+            self.logger.error(error_msg)
+            return ""  # Return empty string to continue with execution phase
+
+    def _run_execution_phase(self) -> str:
+        """Run the execution phase to execute the selected tools."""
+        self.logger.info("Starting execution phase")
         
         # Track if any errors were encountered during tool execution
         tool_errors_encountered = False
@@ -457,7 +567,9 @@ class Bridge:
             
             try:
                 # Get AI response
-                ai_response = self.ollama.generate(prompt, self.config.ollama.default_system_prompt)
+                ai_response = self.ollama.generate_for_phase(
+                    "execution", prompt
+                )
                 self.logger.info(f"Received response from Ollama: {ai_response[:100]}...")
                 
                 # Capture the full response as logged
@@ -633,7 +745,9 @@ class Bridge:
             
             try:
                 # Get AI's review response
-                ai_review_response = self.ollama.generate(prompt, self.config.ollama.default_system_prompt)
+                ai_review_response = self.ollama.generate_for_phase(
+                    "review", prompt
+                )
                 self.logger.info(f"Received review response: {ai_review_response[:100]}...")
                 
                 # Capture the full review response as logged
@@ -748,6 +862,72 @@ class Bridge:
             
         return final_response
     
+    def _run_verification_phase(self, execution_result: str) -> str:
+        """Run the verification phase to verify results against expectations."""
+        self.logger.info("Starting verification phase")
+        
+        # Build a verification prompt
+        verification_prompt = self._build_structured_prompt(phase="verification")
+        
+        try:
+            # Get AI to verify the results
+            verification_response = self.ollama.generate_for_phase(
+                "verification", verification_prompt
+            )
+            self.logger.info(f"Received verification response: {verification_response[:100]}...")
+            
+            # Store the verification result in the context
+            self.context.append({"role": "verification", "content": verification_response})
+            
+            # Store in partial outputs for reporting
+            self.partial_outputs.append({
+                "type": "verification",
+                "content": verification_response,
+                "phase": "verification"
+            })
+            
+            return verification_response
+        except Exception as e:
+            error_msg = f"Error in verification phase: {str(e)}"
+            self.logger.error(error_msg)
+            return ""  # Return empty string to continue with learning phase
+
+    def _run_learning_phase(self, final_response: str) -> None:
+        """Run the learning phase to extract patterns and update knowledge for future use."""
+        self.logger.info("Starting learning phase")
+        
+        # Build a learning prompt
+        learning_prompt = self._build_structured_prompt(phase="learning")
+        
+        try:
+            # Get AI to learn from the final response
+            learning_response = self.ollama.generate_for_phase(
+                "learning", learning_prompt
+            )
+            self.logger.info(f"Received learning response: {learning_response[:100]}...")
+            
+            # Store the learning result in the context
+            self.context.append({"role": "learning", "content": learning_response})
+            
+            # Store in partial outputs for reporting
+            self.partial_outputs.append({
+                "type": "learning",
+                "content": learning_response,
+                "phase": "learning"
+            })
+            
+            # Update analysis state based on the learning response
+            self._update_analysis_state_from_learning(learning_response)
+        except Exception as e:
+            error_msg = f"Error in learning phase: {str(e)}"
+            self.logger.error(error_msg)
+
+    def _update_analysis_state_from_learning(self, learning_response: str) -> None:
+        """Update the internal analysis state based on the learning response."""
+        # Implement the logic to update the analysis state based on the learning response
+        # This is a placeholder and should be replaced with the actual implementation
+        pass
+
     def _remove_commands(self, text: str) -> str:
         """
         Remove EXECUTE command blocks from text to get the clean response.
@@ -1503,6 +1683,14 @@ def main():
     parser.add_argument("--ghidra-url", help="GhidraMCP server URL")
     parser.add_argument("--model", help="Ollama model to use")
     parser.add_argument("--summarization-model", help="Specialized model to use for summarization and report generation (defaults to main model if not specified)")
+    
+    # Add model arguments for each phase
+    parser.add_argument("--planning-model", help="Model to use for the planning phase")
+    parser.add_argument("--execution-model", help="Model to use for the execution phase")
+    parser.add_argument("--review-model", help="Model to use for the review phase")
+    parser.add_argument("--verification-model", help="Model to use for the verification phase")
+    parser.add_argument("--learning-model", help="Model to use for the learning phase")
+    
     parser.add_argument("--interactive", action="store_true", help="Run in interactive mode")
     parser.add_argument("--health-check", action="store_true", help="Check health of services and exit")
     parser.add_argument("--mock", action="store_true", help="Run in mock mode (no GhidraMCP server needed)")
@@ -1512,6 +1700,8 @@ def main():
                         help="Maximum number of steps for agentic execution loop (default: 5)")
     parser.add_argument("--max-review-rounds", type=int, default=3,
                         help="Maximum number of review rounds after tool execution (default: 3)")
+    parser.add_argument("--list-models", action="store_true", 
+                        help="List available models from Ollama server and exit")
     args = parser.parse_args()
     
     # Load config from environment variables
@@ -1530,6 +1720,25 @@ def main():
         config.ghidra.mock_mode = True
         print("Running in MOCK mode - No GhidraMCP server required")
     
+    # Set up model map from command-line arguments
+    model_map = {}
+    phase_models = [
+        ("planning", args.planning_model),
+        ("execution", args.execution_model),
+        ("review", args.review_model),
+        ("verification", args.verification_model),
+        ("learning", args.learning_model),
+        # Summarization uses the summarization_model parameter
+    ]
+    
+    for phase, model in phase_models:
+        if model:
+            model_map[phase] = model
+    
+    # Only update if at least one model was specified
+    if model_map:
+        config.ollama.model_map.update(model_map)
+    
     # Pass the flag to the Bridge constructor
     bridge = Bridge(
         config, 
@@ -1537,6 +1746,18 @@ def main():
         max_agent_steps=args.max_steps,
         max_review_rounds=args.max_review_rounds
     )
+    
+    # List models and exit if requested
+    if args.list_models:
+        try:
+            models = bridge.ollama.list_models()
+            print("Available Ollama models:")
+            for model in models:
+                print(f"- {model}")
+            sys.exit(0)
+        except Exception as e:
+            print(f"Error listing models: {str(e)}")
+            sys.exit(1)
     
     if args.health_check:
         status = bridge.health_check()
@@ -1546,13 +1767,20 @@ def main():
     
     if args.interactive:
         print("Ollama-GhidraMCP Bridge (Interactive Mode)")
-        print(f"Using model: {config.ollama.model}")
+        print(f"Default model: {config.ollama.model}")
+        
+        # Print phase-specific models if configured
+        for phase, model in config.ollama.model_map.items():
+            if model:
+                print(f"Model for {phase} phase: {model}")
+                
         if config.ollama.summarization_model:
-            print(f"Using summarization model: {config.ollama.summarization_model}")
+            print(f"Model for summarization: {config.ollama.summarization_model}")
+            
         print(f"Capabilities included: {'Yes' if args.include_capabilities else 'No'}")
         print(f"Tool execution steps: {bridge.max_agent_steps}")
         print(f"Review rounds: {bridge.max_review_rounds}")
-        print("Type 'exit' or 'quit' to exit")
+        print("Type 'exit' or 'quit' to exit, 'models' to list available models")
         
         while True:
             try:
@@ -1564,6 +1792,16 @@ def main():
                     status = bridge.health_check()
                     print(f"Ollama Health: {'OK' if status['ollama'] else 'FAIL'}")
                     print(f"GhidraMCP Health: {'OK' if status['ghidra'] else 'FAIL'}")
+                    continue
+                    
+                if query.lower() == "models":
+                    try:
+                        models = bridge.ollama.list_models()
+                        print("\nAvailable Ollama models:")
+                        for model in models:
+                            print(f"- {model}")
+                    except Exception as e:
+                        print(f"Error listing models: {str(e)}")
                     continue
                     
                 response = bridge.process_query(query)
