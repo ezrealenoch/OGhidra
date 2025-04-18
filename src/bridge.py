@@ -76,6 +76,13 @@ class Bridge:
         # Store partial outputs for building a cohesive final report
         self.partial_outputs = []
         
+        # Planned tools tracker - track which tools are planned and executed
+        self.planned_tools_tracker = {
+            'planned': [],  # List of planned tool calls [{'tool': name, 'params': {}, 'execution_status': 'pending'}]
+            'executed': [],  # List of executed tool calls [{'tool': name, 'params': {}}]
+            'pending_critical': []  # List of critical planned tools that haven't been executed yet
+        }
+        
         # Context summarization settings
         self.context_summarization_threshold = self.config.context_limit * 0.8
         self.last_summarization_time = None
@@ -168,11 +175,14 @@ class Bridge:
             "2. Use tools by writing `EXECUTE: tool_name(param1=value1, ...)` for each tool call\n"
             "3. IMPORTANT FOR RENAME OPERATIONS: When using rename_function_by_address, "
             "the function_address parameter must be the numerical address (e.g., '1800011a8'), not the function name (e.g., 'FUN_1800011a8')\n"
-            "4. Provide analysis along with your tool calls\n"
-            "5. Your response should be clear and concise\n"
-            "6. When you have completed your analysis and are ready to provide a final answer, include \"FINAL RESPONSE:\" followed by your complete answer\n"
-            "7. If you're unsure what to do or the request is ambiguous, ask a clarifying question instead of guessing\n"
-            "8. If you identify useful combinations of tools for common tasks, you can make a `SUGGESTION:` for future improvements\n"
+            "4. CRITICAL: You MUST use an explicit EXECUTE command for any action you want to perform. "
+            "Simply stating that you 'will rename' or 'should add a comment' is NOT sufficient - you must "
+            "include the actual EXECUTE command to perform the action.\n"
+            "5. Provide analysis along with your tool calls\n"
+            "6. Your response should be clear and concise\n"
+            "7. When you have completed your analysis and are ready to provide a final answer, include \"FINAL RESPONSE:\" followed by your complete answer\n"
+            "8. If you're unsure what to do or the request is ambiguous, ask a clarifying question instead of guessing\n"
+            "9. If you identify useful combinations of tools for common tasks, you can make a `SUGGESTION:` for future improvements\n"
             "---\n\n"
         )
         
@@ -182,7 +192,13 @@ class Bridge:
         # Add final response request based on the last message
         if self.context and self.context[-1]["role"] == "user":
             if not self.current_plan:
-                full_prompt += "## Planning Phase:\nBefore executing tools, create a detailed plan outlining the steps you'll take to address the user's request.\n"
+                full_prompt += (
+                    "## Planning Phase:\n"
+                    "Before executing tools, create a detailed plan outlining the steps you'll take to address the user's request.\n"
+                    "IMPORTANT: For any actions that modify content (like renaming functions or adding comments), you MUST explicitly "
+                    "execute these commands using the EXECUTE: format. Simply suggesting or stating an intention to rename/modify "
+                    "is not sufficient - you must output the actual command.\n"
+                )
             else:
                 full_prompt += "## Your Response:\n"
         elif self.context and self.context[-1]["role"] == "review":
@@ -195,6 +211,7 @@ class Bridge:
     def _check_final_response_quality(self, response: str) -> bool:
         """
         Check if the final response is of good quality and doesn't indicate tool limitations.
+        Also verifies that all critical planned tools have been executed.
         
         Args:
             response: The potential final response text
@@ -227,6 +244,36 @@ class Bridge:
         # Check if final response has error messages
         if "ERROR:" in response or "Failed" in response:
             self.logger.info("Final response contains error messages")
+            return False
+            
+        # Check if all critical planned tools have been executed
+        # Update the pending_critical list based on current execution status
+        pending_critical = [
+            tool for tool in self.planned_tools_tracker['planned'] 
+            if tool['is_critical'] and tool['execution_status'] == 'pending'
+        ]
+        
+        if pending_critical:
+            tool_names = ", ".join([tool['tool'] for tool in pending_critical])
+            self.logger.info(f"Critical planned tools not executed: {tool_names}")
+            
+            # Check if the response falsely claims actions that weren't performed
+            for tool in pending_critical:
+                tool_name = tool['tool']
+                # Check for phrases that indicate the tool was used when it actually wasn't
+                false_claim_patterns = [
+                    f"renamed to", f"renamed the function", f"function is now named",
+                    f"have renamed", f"renamed", f"new name", f"changed the name",
+                    f"added comment", f"commented", f"set a comment",
+                    f"decompiled"
+                ]
+                
+                for pattern in false_claim_patterns:
+                    if pattern in response_lower and any(rename_tool in tool_name for rename_tool in ["rename", "comment"]):
+                        self.logger.warning(f"Response falsely claims an action was performed: '{pattern}' but {tool_name} was not executed")
+                        return False
+            
+            # If the response doesn't falsely claim completion but critical tools are missing, still return False
             return False
             
         return True
@@ -368,6 +415,9 @@ class Bridge:
             # Extract any tool suggestions
             plan_response, suggestions = self._extract_suggestions(plan_response)
             
+            # Extract planned tools from the plan
+            self._extract_planned_tools(plan_response)
+            
             # Store the plan in the context and the state
             self.current_plan = plan_response
             self.context.append({"role": "plan", "content": plan_response})
@@ -461,6 +511,9 @@ class Bridge:
                     result = self._execute_single_command(cmd_name, cmd_params)
                     all_results.append((tool_call, result))
                     
+                    # Update planned tools tracker
+                    self._mark_tool_as_executed(cmd_name, cmd_params)
+                    
                     # Check if this was an error and track unknown commands
                     if "ERROR: Unknown command" in result:
                         unknown_commands_attempted.add(cmd_name)
@@ -516,6 +569,14 @@ class Bridge:
                 if len(final_parts) > 1:
                     potential_final = final_parts[1].strip()
                 
+                # Check for implied actions without commands
+                implied_actions_prompt = self._check_implied_actions_without_commands(final_response)
+                if implied_actions_prompt:
+                    self.logger.info("Found implied actions without commands in final response")
+                    # Add a prompt for the next round asking for explicit commands
+                    self.context.append({"role": "review", "content": implied_actions_prompt})
+                    continue  # Skip to next review round
+                
                 # Check the quality of the final response
                 if self._check_final_response_quality(potential_final):
                     has_final_response = True
@@ -542,6 +603,12 @@ class Bridge:
                             f"and see if you can overcome these limitations with alternative approaches. "
                             f"If you've completed your analysis, provide a final answer prefixed with 'FINAL RESPONSE:'"
                         )
+                    
+                    # Add information about pending critical tools
+                    pending_tools_prompt = self._get_pending_critical_tools_prompt()
+                    if pending_tools_prompt:
+                        review_prompt += pending_tools_prompt
+                        
                     self.context.append({"role": "review", "content": review_prompt})
             else:
                 # Regular review prompt
@@ -550,6 +617,12 @@ class Bridge:
                     f"If not, what additional information or analysis is needed? "
                     f"If yes, provide a complete and comprehensive final answer prefixed with 'FINAL RESPONSE:'"
                 )
+                
+                # Add information about pending critical tools
+                pending_tools_prompt = self._get_pending_critical_tools_prompt()
+                if pending_tools_prompt:
+                    review_prompt += pending_tools_prompt
+                    
                 self.context.append({"role": "review", "content": review_prompt})
             
             # Build a new prompt with the review context
@@ -599,6 +672,14 @@ class Bridge:
                         if len(final_parts) > 1:
                             potential_final = final_parts[1].strip()
                         
+                        # Check for implied actions without commands
+                        implied_actions_prompt = self._check_implied_actions_without_commands(clean_review)
+                        if implied_actions_prompt:
+                            self.logger.info("Found implied actions without commands in review response")
+                            # Add a prompt for the next round asking for explicit commands
+                            self.context.append({"role": "review", "content": implied_actions_prompt})
+                            continue  # Skip to next review round
+                        
                         # Check the quality of the final response
                         if self._check_final_response_quality(potential_final):
                             has_final_response = True
@@ -631,6 +712,9 @@ class Bridge:
                         
                         # Add result to context
                         self.context.append({"role": "tool_result", "content": result})
+                        
+                        # Update planned tools tracker
+                        self._mark_tool_as_executed(cmd_name, cmd_params)
                         
                         # Check if this was an error and track unknown commands
                         if "ERROR: Unknown command" in result:
@@ -1256,6 +1340,161 @@ class Bridge:
         
         query_lower = query.lower()
         return any(keyword in query_lower for keyword in summarization_keywords)
+
+    def _extract_planned_tools(self, plan_text: str) -> None:
+        """
+        Extract planned tool calls from the AI's planning response.
+        Identifies which tools the AI plans to use and marks critical ones.
+        
+        Args:
+            plan_text: The AI's planning response text
+        """
+        # Reset the planned tools tracker for the new plan
+        self.planned_tools_tracker = {
+            'planned': [],
+            'executed': [],
+            'pending_critical': []
+        }
+        
+        # Common tools that might be mentioned in plans
+        common_tools = [
+            "list_functions", "list_methods", "decompile_function", "decompile_function_by_address",
+            "rename_function", "rename_function_by_address", "set_decompiler_comment", 
+            "set_disassembly_comment", "search_functions_by_name", "disassemble_function"
+        ]
+        
+        # Patterns that indicate a tool is critical to the task
+        critical_patterns = [
+            "will need to", "essential", "necessary", "required", "important", 
+            "critical", "key step", "must", "rename", "need to"
+        ]
+        
+        # Process each line of the plan
+        lines = plan_text.lower().split('\n')
+        for i, line in enumerate(lines):
+            # Check for mentions of tools in this line
+            for tool in common_tools:
+                if tool.lower() in line:
+                    # Check if this is part of a numbered or bulleted step
+                    is_step = bool(re.match(r'^\s*(\d+\.|[\-\*•])', line))
+                    
+                    # Look at surrounding context (current line and next line if available)
+                    context = line
+                    if i < len(lines) - 1:
+                        context += " " + lines[i + 1]
+                    
+                    # Determine if this tool is critical based on context
+                    is_critical = False
+                    for pattern in critical_patterns:
+                        if pattern in context:
+                            is_critical = True
+                            break
+                    
+                    # Create a tool tracking entry
+                    tool_entry = {
+                        'tool': tool,
+                        'execution_status': 'pending',
+                        'is_critical': is_critical or 'rename' in tool,  # Always mark rename operations as critical
+                        'context': context
+                    }
+                    
+                    self.planned_tools_tracker['planned'].append(tool_entry)
+                    
+                    # Add critical tools to the pending critical list
+                    if tool_entry['is_critical']:
+                        self.planned_tools_tracker['pending_critical'].append(tool_entry)
+                        
+        self.logger.info(f"Extracted {len(self.planned_tools_tracker['planned'])} planned tools from plan")
+        if self.planned_tools_tracker['pending_critical']:
+            self.logger.info(f"Identified {len(self.planned_tools_tracker['pending_critical'])} critical tools in plan")
+
+    def _mark_tool_as_executed(self, command_name: str, params: Dict[str, Any]) -> None:
+        """
+        Mark a tool as executed in the planned tools tracker.
+        
+        Args:
+            command_name: The name of the executed command
+            params: The parameters used for the command
+        """
+        for tool_entry in self.planned_tools_tracker['planned']:
+            if tool_entry['tool'] == command_name:
+                tool_entry['execution_status'] = 'executed'
+                break
+
+    def _get_pending_critical_tools_prompt(self) -> str:
+        """
+        Generate a prompt section about pending critical tools.
+        
+        Returns:
+            A string to be included in the review prompt if there are pending critical tools
+        """
+        # Update the pending_critical list based on current execution status
+        self.planned_tools_tracker['pending_critical'] = [
+            tool for tool in self.planned_tools_tracker['planned'] 
+            if tool['is_critical'] and tool['execution_status'] == 'pending'
+        ]
+        
+        if not self.planned_tools_tracker['pending_critical']:
+            return ""
+            
+        # Generate the prompt
+        pending_tools_prompt = "\n\nThere are pending critical tool calls that appear necessary but have not been executed:\n"
+        
+        for tool in self.planned_tools_tracker['pending_critical']:
+            pending_tools_prompt += f"- {tool['tool']}: Mentioned in context \"{tool['context']}\"\n"
+            
+        pending_tools_prompt += "\nPlease ensure these critical tool calls are explicitly executed before concluding the task."
+        
+        return pending_tools_prompt
+
+    def _check_implied_actions_without_commands(self, response_text: str) -> str:
+        """
+        Check if the response text implies actions that should be taken but doesn't include 
+        the actual EXECUTE commands to perform those actions.
+        
+        Args:
+            response_text: The AI's response text
+            
+        Returns:
+            A prompt string asking for explicit commands if needed, otherwise empty string
+        """
+        # Skip if there are already commands in the response
+        if "EXECUTE:" in response_text:
+            return ""
+            
+        # Patterns that indicate implied actions without explicit commands
+        implied_action_patterns = [
+            (r"(should|will|going to|let's) rename", "rename_function"),
+            (r"(should|will|going to|let's) add comment", "set_decompiler_comment"),
+            (r"(suggest|proposed|recommend) (naming|naming it|renaming)", "rename_function"),
+            (r"(suggest|proposed|recommend) (to|that) name", "rename_function"),
+            (r"(appropriate|suitable|better|good|descriptive) name would be", "rename_function"),
+            (r"function (should|could|would) be (named|called)", "rename_function"),
+            (r"rename (the|this) function (to|as)", "rename_function"),
+            (r"naming it ['\"]([\w_]+)['\"]", "rename_function")
+        ]
+        
+        response_lower = response_text.lower()
+        
+        # Check for implied actions
+        implied_actions = []
+        for pattern, related_tool in implied_action_patterns:
+            if re.search(pattern, response_lower):
+                implied_actions.append((pattern, related_tool))
+                
+        if not implied_actions:
+            return ""
+            
+        # Generate a prompt asking for explicit commands
+        action_prompt = "\n\nYour response implies certain actions should be taken, but you didn't include explicit EXECUTE commands:\n"
+        
+        for pattern, tool in implied_actions:
+            matches = re.findall(pattern, response_lower)
+            if matches:
+                action_prompt += f"- You mentioned: '{pattern.replace('|', ' or ')}'\n"
+                
+        action_prompt += "\nPlease provide explicit EXECUTE commands to perform these actions."
+        return action_prompt
 
 def main():
     """Main entry point for the bridge application."""
