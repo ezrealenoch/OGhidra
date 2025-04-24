@@ -1,7 +1,7 @@
 # Ollama-GhidraMCP Bridge
 
 A Python application that bridges locally hosted AI models (via Ollama) with GhidraMCP for AI-assisted reverse engineering tasks within Ghidra.
-(Authors Note: LOL I asked it to be agentic and it worked. Currently using cogito:32b, its very brief and not wordy so its good at running tools)
+(Working on agentic loop. Currently using cogito:32b, its very brief and not wordy so its good at running tools)
 ![Screenshot 2025-04-14 155639](https://github.com/user-attachments/assets/f8fb0fb1-6a9c-4097-8e3e-00d87d2d96f4)
 
 
@@ -29,11 +29,15 @@ This bridge connects the following components:
 - Ollama server running locally or remotely
 - GhidraMCP server running within Ghidra
 
+## Pre-installation
+- Follow the installation steps from Laurie's project (https://github.com/LaurieWired/GhidraMCP)
+   - Install the GhidraPlugin and enable developer mode
+
 ## Installation
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/yourusername/ollama-ghidra-bridge.git
+   git clone https://github.com/ezrealenoch/ollama-ghidra-bridge.git
    cd ollama-ghidra-bridge
    ```
 
