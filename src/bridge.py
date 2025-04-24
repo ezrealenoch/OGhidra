@@ -191,6 +191,7 @@ class Bridge:
         )
         
         # Add phase-specific sections
+        full_prompt = ""
         if phase == "context_assessment":
             full_prompt = (
                 "## Context Assessment Phase:\n"
@@ -203,7 +204,7 @@ class Bridge:
                 "4. Recommended approach based on available information\n"
             )
         elif phase == "tool_selection":
-            full_prompt += (
+            full_prompt = (
                 "## Tool Selection Phase:\n"
                 "Based on the plan, identify the specific Ghidra tools needed to accomplish each step.\n"
                 "For each planned step, specify:\n"
@@ -423,72 +424,116 @@ class Bridge:
         }
         final_response = ""
         self.partial_outputs = []
+        tool_errors_encountered = False
         
-        # 1. Initial Context Assessment Phase
-        # This phase analyzes available information and sets the scope
-        context_assessment_result = self._run_context_assessment_phase()
-        if self._check_for_clarification_request(context_assessment_result):
-            return context_assessment_result
-        
-        # 2. Planning Phase - Now with context assessment information
-        planning_result = self._run_planning_phase(context_assessment_result)
-        if self._check_for_clarification_request(planning_result):
-            return planning_result
-        
-        # 3. Tool Selection Phase - Identify tools needed for the task
-        tool_selection_result = self._run_tool_selection_phase()
-        if self._check_for_clarification_request(tool_selection_result):
-            return tool_selection_result
-        
-        # 4. Primary Execution Loop - Execute tools with the selected models
-        execution_result = self._run_execution_phase()
-        if isinstance(execution_result, str) and execution_result:
-            # If it's a clarification request or error
-            return execution_result
-        
-        # 5. Verification Phase - Verify results against expectations
-        verification_result = self._run_verification_phase()
-        
-        # 6. Review and Reasoning Phase - Evaluate completeness
-        review_result = self._run_review_phase(verification_result)
-        if isinstance(review_result, str) and review_result:
-            final_response = review_result
-        
-        # 7. Learning/Adaptation Phase - Only run on successful completions
-        if not tool_errors_encountered:
-            self._run_learning_phase(final_response)
-        
-        return final_response
+        try:
+            # 1. Initial Context Assessment Phase
+            # This phase analyzes available information and sets the scope
+            context_assessment_result = self._run_context_assessment_phase()
+            if context_assessment_result.startswith("Context assessment failed") or context_assessment_result.startswith("Failed to build context assessment prompt"):
+                tool_errors_encountered = True
+                
+                # Check if it's a connection error with Ollama
+                if "[WinError 10061]" in context_assessment_result or "connection could be made" in context_assessment_result:
+                    final_response = (
+                        "Error: Could not connect to Ollama. Please check that:\n"
+                        "1. Ollama is running on your system\n"
+                        "2. It's accessible at http://localhost:11434\n"
+                        "3. The model 'cogito:32b' is available\n\n"
+                        "Full error: " + context_assessment_result
+                    )
+                else:
+                    final_response = f"Error during context assessment: {context_assessment_result}"
+                return final_response
+            
+            if self._check_for_clarification_request(context_assessment_result):
+                return context_assessment_result
+            
+            # 2. Planning Phase - Now with context assessment information
+            planning_result = self._run_planning_phase(context_assessment_result)
+            if self._check_for_clarification_request(planning_result):
+                return planning_result
+            
+            # 3. Tool Selection Phase - Identify tools needed for the task
+            tool_selection_result = self._run_tool_selection_phase()
+            if tool_selection_result.startswith("Unable to complete tool selection") or tool_selection_result.startswith("Unable to build tool selection prompt"):
+                tool_errors_encountered = True
+                final_response = f"Error during tool selection: {tool_selection_result}"
+                return final_response
+                
+            if self._check_for_clarification_request(tool_selection_result):
+                return tool_selection_result
+            
+            # 4. Primary Execution Loop - Execute tools with the selected models
+            execution_result = self._run_execution_phase()
+            if isinstance(execution_result, str) and execution_result:
+                # If it's a clarification request or error
+                return execution_result
+            
+            # 5. Verification Phase - Verify results against expectations
+            verification_result = self._run_verification_phase(execution_result or "")
+            
+            # 6. Review and Reasoning Phase - Evaluate completeness
+            final_response = verification_result  # Default to verification result in case of error
+            
+            # We don't have a direct _run_review_phase method as it's integrated with the execution phase
+            # For now, we'll just use the verification result
+            
+            # 7. Learning/Adaptation Phase - Only run on successful completions
+            if not tool_errors_encountered and final_response:
+                try:
+                    self._run_learning_phase(final_response)
+                except Exception as e:
+                    self.logger.error(f"Error in learning phase: {str(e)}")
+                    # Continue with the final response even if learning phase fails
+            
+            return final_response
+        except Exception as e:
+            error_msg = f"Unexpected error in query processing: {str(e)}"
+            self.logger.error(error_msg)
+            return f"An unexpected error occurred: {str(e)}"
     
     def _run_context_assessment_phase(self) -> str:
         """Run the initial context assessment phase to analyze available information."""
         self.logger.info("Starting context assessment phase")
         
-        # Build a prompt specifically for context assessment
-        assessment_prompt = self._build_structured_prompt(phase="context_assessment")
-        
         try:
-            # Generate the context assessment using the specific model for this phase
-            assessment_response = self.ollama.generate_for_phase(
-                "context_assessment", assessment_prompt
-            )
-            self.logger.info(f"Received context assessment: {assessment_response[:100]}...")
+            # Build a prompt specifically for context assessment
+            assessment_prompt = self._build_structured_prompt(phase="context_assessment")
             
-            # Store the assessment in the context
-            self.context.append({"role": "context_assessment", "content": assessment_response})
-            
-            # Store in partial outputs for reporting
-            self.partial_outputs.append({
-                "type": "context_assessment",
-                "content": assessment_response,
-                "phase": "context_assessment"
-            })
-            
-            return assessment_response
+            try:
+                # Generate the context assessment using the specific model for this phase
+                assessment_response = self.ollama.generate_for_phase(
+                    "context_assessment", assessment_prompt
+                )
+                self.logger.info(f"Received context assessment: {assessment_response[:100]}...")
+                
+                # Store the assessment in the context
+                self.context.append({"role": "context_assessment", "content": assessment_response})
+                
+                # Store in partial outputs for reporting
+                self.partial_outputs.append({
+                    "type": "context_assessment",
+                    "content": assessment_response,
+                    "phase": "context_assessment"
+                })
+                
+                return assessment_response
+            except Exception as e:
+                error_msg = f"Error in context assessment phase: {str(e)}"
+                self.logger.error(error_msg)
+                # Store the error in context
+                error_response = f"Context assessment failed: {str(e)}"
+                self.context.append({"role": "context_assessment", "content": error_response})
+                return error_response  # Return error message to continue with planning phase
         except Exception as e:
-            error_msg = f"Error in context assessment phase: {str(e)}"
+            # Handle errors in building the prompt
+            error_msg = f"Error preparing context assessment prompt: {str(e)}"
             self.logger.error(error_msg)
-            return ""  # Return empty string to continue with planning phase
+            # Store the error in context
+            error_response = f"Failed to build context assessment prompt: {str(e)}"
+            self.context.append({"role": "context_assessment", "content": error_response})
+            return error_response  # Return error message to continue with planning phase
 
     def _run_planning_phase(self, context_assessment_result: str) -> str:
         """Run the planning phase with context assessment information."""
@@ -519,32 +564,38 @@ class Bridge:
         """Run the tool selection phase to identify specific tools needed for the task."""
         self.logger.info("Starting tool selection phase")
         
-        # Build a tool selection prompt
-        tool_selection_prompt = self._build_structured_prompt(phase="tool_selection")
-        
         try:
-            # Get AI to select tools
-            tool_selection_response = self.ollama.generate_for_phase(
-                "tool_selection", tool_selection_prompt
-            )
-            self.logger.info(f"Received tool selection response: {tool_selection_response[:100]}...")
+            # Build a tool selection prompt
+            tool_selection_prompt = self._build_structured_prompt(phase="tool_selection")
             
-            # Extract tool suggestions
-            tool_selection_response, suggestions = self._extract_suggestions(tool_selection_response)
-            
-            # Extract planned tools from the response
-            self._extract_planned_tools(tool_selection_response)
-            
-            # Store the tool selection result in the context
-            self.context.append({"role": "tool_selection", "content": tool_selection_response})
-            
-            self.logger.info("Tool selection phase completed")
-            
-            return tool_selection_response
+            try:
+                # Get AI to select tools
+                tool_selection_response = self.ollama.generate_for_phase(
+                    "tool_selection", tool_selection_prompt
+                )
+                self.logger.info(f"Received tool selection response: {tool_selection_response[:100]}...")
+                
+                # Extract tool suggestions
+                tool_selection_response, suggestions = self._extract_suggestions(tool_selection_response)
+                
+                # Extract planned tools from the response
+                self._extract_planned_tools(tool_selection_response)
+                
+                # Store the tool selection result in the context
+                self.context.append({"role": "tool_selection", "content": tool_selection_response})
+                
+                self.logger.info("Tool selection phase completed")
+                
+                return tool_selection_response
+            except Exception as e:
+                error_msg = f"Error in tool selection phase: {str(e)}"
+                self.logger.error(error_msg)
+                return f"Unable to complete tool selection: {str(e)}"  # Return error message
         except Exception as e:
-            error_msg = f"Error in tool selection phase: {str(e)}"
+            # Handle errors in building the prompt
+            error_msg = f"Error preparing tool selection prompt: {str(e)}"
             self.logger.error(error_msg)
-            return ""  # Return empty string to continue with execution phase
+            return f"Unable to build tool selection prompt: {str(e)}"  # Return error message
 
     def _run_execution_phase(self) -> str:
         """Run the execution phase to execute the selected tools."""
