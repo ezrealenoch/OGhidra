@@ -229,3 +229,138 @@ python -m loop_demo.cli --topic "Your Topic Here"
 - [Google ADK Documentation](https://google.github.io/adk-docs/)
 - [Loop Agents Documentation](https://google.github.io/adk-docs/agents/workflow-agents/loop-agents/)
 - [Gemini API Documentation](https://ai.google.dev/gemini-api/docs)
+
+# OGhidra - Agentic Ghidra Analysis
+
+OGhidra integrates Google's Agent Development Kit (ADK) with the Ghidra Software Reverse Engineering Framework, enhancing Ghidra's capabilities through an agentic workflow for binary analysis.
+
+## Project Structure
+
+```
+├── src/
+│   ├── adk_agents/
+│   │   ├── ghidra_analyzer/
+│   │   │   ├── agents.py        # Defines the Ghidra analyzer agents
+│   │   │   ├── tests.py         # Test suite for Ghidra analyzer
+│   │   │   └── run_tests.py     # Script to run the tests
+│   ├── adk_tools/
+│   │   ├── ghidra_mcp.py        # Defines Ghidra ADK tools
+│   │   └── ...
+│   └── ...
+```
+
+## Setup
+
+### Prerequisites
+
+- Python 3.10+
+- Google ADK (`pip install google-adk`)
+- LiteLLM (`pip install litellm`)
+- Ghidra (with GhidraMCP server running)
+
+### Installation
+
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/OGhidra.git
+cd OGhidra
+```
+
+2. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+3. Configure your environment:
+- Set up your LLM API keys in an `.env` file
+- Configure GhidraMCP server (ensure it's running)
+
+## Usage
+
+### Starting the ADK Web Interface
+
+Run the ADK web interface to interact with the Ghidra analyzer agents:
+
+```bash
+cd OGhidra
+adk web
+```
+
+This will start the web interface at http://localhost:8000
+
+### Opening a Project in Ghidra
+
+1. Open Ghidra and load your binary
+2. Start the MCP server from Ghidra's menu: Window -> MCP Server
+3. The server will start on localhost:2468 by default
+
+### Example Queries
+
+The Ghidra analyzer supports various types of queries:
+
+- **List all functions**:
+  ```
+  List all functions in the current binary
+  ```
+
+- **Analyze a specific function**:
+  ```
+  What does the function main do?
+  ```
+
+- **Recursive function analysis**:
+  ```
+  Analyze the program starting from entry point and describe its behavior
+  ```
+
+- **Function renaming based on behavior**:
+  ```
+  Rename function FUN_00401000 based on its behavior
+  ```
+
+### Running Tests
+
+OGhidra includes comprehensive tests for the Ghidra analyzer agent. To run the test suite:
+
+```bash
+cd OGhidra/src/adk_agents/ghidra_analyzer
+python run_tests.py
+```
+
+The test suite includes:
+- Unit tests for all Ghidra tools
+- Mock responses to simulate GhidraMCP server
+- Tests for agent interactions and workflows
+
+## Architecture
+
+OGhidra implements an agent loop with four specialized agents:
+
+1. **Planning Agent**: Analyzes user queries and creates a plan for binary analysis
+2. **Tool Execution Agent**: Executes Ghidra analysis tools based on the plan
+3. **Analysis Agent**: Interprets results from tool execution
+4. **Review Agent**: Provides final summaries and recommendations
+
+## Troubleshooting
+
+- **MCP Connection Issues**: Ensure the MCP server is running in Ghidra (Window -> MCP Server)
+- **ADK Errors**: Check that your `.env` file contains the required API keys
+- **Missing Agent Functions**: Verify that all Python packages are properly installed
+- **Test Failures**: If tests fail, check your environment setup and GhidraMCP server status
+
+## Extending the System
+
+You can add additional Ghidra tools by editing `src/adk_tools/ghidra_mcp.py` and updating the agent definitions in `src/adk_agents/ghidra_analyzer/agents.py`.
+
+## Contributing
+
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+## License
+
+This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+- The Ghidra team at NSA for their amazing reverse engineering framework
+- Google ADK team for the agent framework
