@@ -12,12 +12,17 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 
 if __name__ == "__main__":
     from tests import TestGhidraAnalyzer
+    from robustness_tests import RobustnessTests
     
-    # Create a test suite
-    suite = unittest.TestLoader().loadTestsFromTestCase(TestGhidraAnalyzer)
+    # Create test suites
+    regular_suite = unittest.TestLoader().loadTestsFromTestCase(TestGhidraAnalyzer)
+    robustness_suite = unittest.TestLoader().loadTestsFromTestCase(RobustnessTests)
+    
+    # Combine all test suites
+    all_tests = unittest.TestSuite([regular_suite, robustness_suite])
     
     # Run the tests
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    result = unittest.TextTestRunner(verbosity=2).run(all_tests)
     
     # Return non-zero exit code if tests failed
     sys.exit(not result.wasSuccessful())

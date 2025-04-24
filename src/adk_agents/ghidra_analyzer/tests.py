@@ -322,6 +322,178 @@ Analysis of program from entry point:
         self.assertIn("Calls: malloc", result)
         logger.info("test_recursive_analysis_ghidra_mcp passed")
 
+    def test_planner_agent_robustness(self):
+        """Test that the Planner agent handles different response formats robustly."""
+        logger.info("Running test_planner_agent_robustness")
+        
+        # Import the agent module with our modified agents
+        from src.adk_agents.ghidra_analyzer.agents import planning_agent
+        
+        # Create a simple query
+        query = "List all functions"
+        state = {
+            "user_query": query,
+            "ghidra_plan": [],
+            "last_tool_result": None,
+            "current_analysis": ""
+        }
+        
+        # Test with a mock LiteLLM to simulate different response formats
+        with patch('litellm.completion') as mock_completion:
+            # Case 1: Simulate a response with missing 'arguments' key
+            mock_completion.return_value = {
+                "choices": [{
+                    "message": {
+                        "content": json.dumps([
+                            {"tool_name": "ghidra_list_functions", "parameters": {}}
+                        ])
+                    }
+                }]
+            }
+            
+            # Run the planning agent in a try-except block to catch errors
+            try:
+                # We'll run just the planning agent's processing, not the full loop
+                # Use a direct call to the agent's internal functions to test behavior
+                result = planning_agent._instruction_model.predict({"user_query": query})
+                logger.info(f"Planner returned: {result}")
+                
+                # Verify that the result is valid JSON with expected structure
+                plan = json.loads(result)
+                self.assertIsInstance(plan, list, "Plan should be a JSON list")
+                if len(plan) > 0:
+                    self.assertIn("tool_name", plan[0], "Tool call should have 'tool_name'")
+                    self.assertIn("parameters", plan[0], "Tool call should have 'parameters'")
+                
+                logger.info("Planning agent handled non-function-call format successfully")
+            except Exception as e:
+                self.fail(f"Planning agent failed with error: {e}")
+        
+        # Case 2: Test handling of "EXIT LOOP" query
+        with patch('litellm.completion') as mock_completion:
+            # Simulate a response for EXIT LOOP
+            mock_completion.return_value = {
+                "choices": [{
+                    "message": {
+                        "content": json.dumps({"exit_loop": True})
+                    }
+                }]
+            }
+            
+            try:
+                result = planning_agent._instruction_model.predict({"user_query": "EXIT LOOP"})
+                logger.info(f"Planner returned for EXIT LOOP: {result}")
+                
+                # Verify that the result contains exit_loop
+                plan = json.loads(result)
+                self.assertIsInstance(plan, dict, "Result should be a JSON object")
+                self.assertIn("exit_loop", plan, "Result should contain 'exit_loop' key")
+                self.assertTrue(plan["exit_loop"], "exit_loop should be true")
+                
+                logger.info("Planning agent handled EXIT LOOP correctly")
+            except Exception as e:
+                self.fail(f"Planning agent failed with EXIT LOOP error: {e}")
+        
+        logger.info("test_planner_agent_robustness passed")
+
+    def test_end_to_end_agent_resilience(self):
+        """
+        Test that the entire agent pipeline is resilient to various LLM response formats.
+        This test simulates how agents handle different response patterns from the LLM.
+        """
+        logger.info("Running test_end_to_end_agent_resilience")
+        
+        from src.adk_agents.ghidra_analyzer.agents import (
+            planning_agent, tool_executor_agent, analysis_agent, review_agent
+        )
+        
+        # Test scenario: LLM returns different JSON formats
+        with patch('litellm.completion') as mock_completion:
+            # Set up a sequence of responses for different agent turns
+            responses = [
+                # Planner: Direct JSON array without function call format
+                {
+                    "choices": [{
+                        "message": {
+                            "content": json.dumps([
+                                {"tool_name": "ghidra_list_functions", "parameters": {}}
+                            ])
+                        }
+                    }]
+                },
+                # Executor: JSON object with status info
+                {
+                    "choices": [{
+                        "message": {
+                            "content": json.dumps({
+                                "status": "executed", 
+                                "tool": "ghidra_list_functions", 
+                                "success": True
+                            })
+                        }
+                    }]
+                },
+                # Analyzer: Plain text analysis (no JSON)
+                {
+                    "choices": [{
+                        "message": {
+                            "content": "Analysis: Found the following functions: main, init, cleanup"
+                        }
+                    }]
+                },
+                # Reviewer: Simple "STOP" response
+                {
+                    "choices": [{
+                        "message": {
+                            "content": "STOP"
+                        }
+                    }]
+                }
+            ]
+            
+            # Configure the mock to return each response in sequence
+            mock_completion.side_effect = responses
+            
+            # Prepare initial state
+            state = {
+                "user_query": "List all functions",
+                "ghidra_plan": [],
+                "last_tool_result": {"status": "success", "data": ["main", "init", "cleanup"]},
+                "current_analysis": ""
+            }
+            
+            try:
+                # Run each agent separately to simulate a loop
+                planner_result = planning_agent._instruction_model.predict(state)
+                logger.info(f"Planner result: {planner_result}")
+                
+                # Update state as if we've passed through the agent loop
+                state["ghidra_plan"] = json.loads(planner_result)
+                
+                executor_result = tool_executor_agent._instruction_model.predict(state)
+                logger.info(f"Executor result: {executor_result}")
+                
+                # Update state again
+                state["last_tool_result"] = json.loads(executor_result)
+                state["ghidra_plan"] = []  # Simulate the executor removing the executed item
+                
+                analyzer_result = analysis_agent._instruction_model.predict(state)
+                logger.info(f"Analyzer result: {analyzer_result}")
+                
+                # Update state again
+                state["current_analysis"] = analyzer_result
+                
+                reviewer_result = review_agent._instruction_model.predict(state)
+                logger.info(f"Reviewer result: {reviewer_result}")
+                
+                # Verify the flow worked as expected
+                self.assertEqual(reviewer_result.strip(), "STOP", "Reviewer should return STOP")
+                self.assertIn("main", state["current_analysis"], "Analysis should contain function names")
+                
+                logger.info("End-to-end agent resilience test passed")
+            except Exception as e:
+                self.fail(f"End-to-end agent test failed with error: {e}")
+
 
 if __name__ == "__main__":
     unittest.main() 

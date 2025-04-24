@@ -109,19 +109,18 @@ def _format_tool_list_for_prompt(tools: List[FunctionTool]) -> str:
             lines.append(f"- `{tool.name}`: (Error formatting description)")
     return "\n".join(lines)
 
-# Regenerate the planner instruction with the potentially improved formatting
-# AND add the check for "EXIT LOOP"
-PLANNER_INSTRUCTION_WITH_EXIT = f"""
+# Modified planner instruction to avoid function calling issues with Ollama/LiteLLM
+PLANNER_INSTRUCTION_ROBUST = f"""
 You are the Planning Agent for a Ghidra analysis task.
 
-**IMPORTANT FIRST STEP:** Check the 'user_query'. If the query is EXACTLY the text "EXIT LOOP", then you MUST call the `exit_loop` tool immediately and do nothing else. 
+**IMPORTANT FIRST STEP:** Check the 'user_query'. If the query is EXACTLY the text "EXIT LOOP", 
+respond with: {{"exit_loop": true}}
 
 If the query is NOT "EXIT LOOP", proceed with the following planning task:
 Your goal is to analyze the user's query and the current state (including past tool results and analysis)
 and create a step-by-step plan of Ghidra tool calls required to gather the necessary information.
 
 Available Tools (Use EXACT names and provide ONLY the required parameters):
-`exit_loop()`: Immediately stops the entire agent process. Use ONLY if the user query is exactly "EXIT LOOP".
 {_format_tool_list_for_prompt(ALL_GHIDRA_TOOLS)}
 
 Input State Keys:
@@ -130,69 +129,85 @@ Input State Keys:
 - current_analysis (optional): The analysis synthesized so far.
 - ghidra_plan (optional): The existing plan (list of dictionaries), if refining.
 
-Output (only if query is NOT "EXIT LOOP"):
-- You MUST output a JSON list of dictionaries, where each dictionary represents a single tool call.
+**IMPORTANT**: 
+- Your response MUST be in JSON format.
+- For queries that are NOT "EXIT LOOP", output a JSON list of dictionaries, where each dictionary represents a single tool call.
 - Each dictionary MUST have 'tool_name' and 'parameters' (a dictionary of arguments for that specific tool).
 - If a tool takes no arguments, the 'parameters' dictionary MUST be empty: {{}}.
-- Store this list in the 'ghidra_plan' state key.
-- If no tool calls are needed based on the query and state, output an empty list: [].
-- Base your plan on the user_query. If last_tool_result indicates an error, consider if the plan needs adjustment.
+- If no tool calls are needed, output an empty list: [].
 
-Example Output (for 'ghidra_plan'):
+Example response for a standard query:
 [
-  {{"tool_name": "ghidra_list_functions", "parameters": {{}}}},  # Correct: No parameters
-  {{"tool_name": "ghidra_decompile_function_by_name", "parameters": {{"function_name": "main"}}}} # Correct: Required parameter
+  {{"tool_name": "ghidra_list_functions", "parameters": {{}}}},
+  {{"tool_name": "ghidra_decompile_function_by_name", "parameters": {{"function_name": "main"}}}}
 ]
 
-Remember: First check for "EXIT LOOP" in the user_query. If found, call `exit_loop()`. Otherwise, analyze the query and state, then generate the plan.
+Example response for "EXIT LOOP" query:
+{{"exit_loop": true}}
+
+DO NOT explain your reasoning or add any text before or after the JSON.
+ONLY respond with the JSON array of tool calls or the exit_loop object.
 """
 
-# 1. Planning Agent
+# 1. Planning Agent - Modified to work with LiteLLM and Ollama
 planning_agent = LlmAgent(
     name="Planner",
     model=LLM_INSTANCE,
-    instruction=PLANNER_INSTRUCTION_WITH_EXIT, # Use updated instruction
-    tools=[exit_loop] + ALL_GHIDRA_TOOLS, # Add exit_loop tool back
-    output_key="ghidra_plan" # Output the plan to this state key
+    instruction=PLANNER_INSTRUCTION_ROBUST,  # Use the robust instruction that doesn't rely on function calling
+    output_key="ghidra_plan"  # Output the plan to this state key
 )
 
-# 2. Tool Execution Agent
-# Simplified instruction, reinforced to use only provided params
-EXECUTOR_INSTRUCTION_SIMPLE = """
-Execute the first tool call listed in the 'ghidra_plan' state variable.
-Use the tool name and parameters *exactly* as specified in that list entry. Do NOT add any extra parameters.
-Store the complete result dictionary in 'last_tool_result'.
-Update 'ghidra_plan' by removing the executed step.
-Respond only with a brief confirmation message stating the tool executed and the result status (e.g., 'Executed ghidra_list_functions. Status: success.').
+# 2. Tool Execution Agent - Modified to handle the JSON directly
+EXECUTOR_INSTRUCTION_ROBUST = """
+You are the Tool Execution Agent for a Ghidra analysis task.
+
+Your task is to:
+1. Examine the 'ghidra_plan' state key, which contains a list of planned tool calls.
+2. If the list is empty, respond with: {"status": "no_plan", "message": "No tool calls in plan."}
+3. If the list contains an object with {"exit_loop": true}, call the exit_loop() function.
+4. Otherwise, take the first tool call from the list and execute it exactly as specified.
+
+For executing a tool call:
+- Extract the 'tool_name' and 'parameters' from the first item in the ghidra_plan list.
+- Execute the specified tool with the exact parameters provided.
+- Create a result dictionary: {"status": "success", "data": result} or {"status": "error", "message": error_message}
+- Store this result dictionary in 'last_tool_result' state key.
+- Update 'ghidra_plan' by removing the executed step.
+- Respond with a JSON object: {"status": "executed", "tool": tool_name, "success": true/false}
+
+Example Response:
+{"status": "executed", "tool": "ghidra_list_functions", "success": true}
+
+ONLY respond with JSON. DO NOT add any explanation or text before or after the JSON.
 """
+
 tool_executor_agent = LlmAgent(
     name="Executor",
     model=LLM_INSTANCE,
-    instruction=EXECUTOR_INSTRUCTION_SIMPLE,
+    instruction=EXECUTOR_INSTRUCTION_ROBUST,
     include_contents='none',
-    tools=ALL_GHIDRA_TOOLS, # Executor needs tools to execute the plan
-    # Output key handled by framework state manipulation
+    tools=[exit_loop] + ALL_GHIDRA_TOOLS,  # Include the exit_loop tool
 )
 
-# 3. Analysis Agent
+# 3. Analysis Agent - Keep this one mostly the same but reinforce JSON avoidance
 ANALYZER_INSTRUCTION_STRICT = """
 You are the Analysis Agent.
 Your ONLY task is to examine the dictionary stored in the 'last_tool_result' state key.
 
 1. Check the 'status' field within 'last_tool_result'.
-2. If 'status' is 'success', extract the value associated with the 'result' key.
+2. If 'status' is 'success', extract the value associated with the 'data' key.
 3. If 'status' is 'error', extract the value associated with the 'message' key.
 4. Retrieve the original query from the 'user_query' state key.
 5. Retrieve the existing analysis from the 'current_analysis' state key (if it exists).
-6. Synthesize a new analysis by combining the existing 'current_analysis' with the extracted 'result' or 'message' from 'last_tool_result', relating it back to the 'user_query'.
+6. Synthesize a new analysis by combining the existing 'current_analysis' with the extracted data or error message from 'last_tool_result', relating it back to the 'user_query'.
 7. Store this complete, updated analysis text into the 'current_analysis' state key, overwriting the previous value.
-8. Focus *only* on information present in the 'last_tool_result', 'user_query', and 'current_analysis' state keys. Ignore any other context provided.
-9. CRITICAL: Your entire response MUST be plain text only. Do NOT output JSON, do NOT output markdown, and absolutely DO NOT attempt to call any tools or functions.
 
-Example Output (for 'current_analysis' state key - PLAIN TEXT):
+CRITICAL: Your entire response MUST be plain text only. Do NOT output JSON, do NOT use markdown formatting, and absolutely DO NOT attempt to call any tools or functions.
+
+Example Output (PLAIN TEXT ONLY):
 Based on the query 'analyze function main':
-- Tool ghidra_list_functions succeeded. Result: [list of functions]
-- Tool ghidra_decompile_function_by_name failed with error: Function not found.
+- Tool ghidra_list_functions succeeded. Found the following functions: main, printf, malloc, free
+- The decompilation reveals main calls printf and malloc functions.
 """
 analysis_agent = LlmAgent(
     name="Analyzer",
@@ -201,11 +216,8 @@ analysis_agent = LlmAgent(
     output_key="current_analysis"
 )
 
-# 4. Review Agent
-review_agent = LlmAgent(
-    name="Reviewer",
-    model=LLM_INSTANCE,
-    instruction="""
+# 4. Review Agent - Keep this one mostly the same
+REVIEWER_INSTRUCTION = """
 You are the Review Agent.
 Your role is to check if the Ghidra analysis task is complete and the user query is answered.
 
@@ -216,17 +228,18 @@ Input State Keys:
 - last_tool_result (optional): The result of the very last tool call.
 
 Decision Logic:
-1. Examine the 'ghidra_plan'. If it is NOT empty, the task is not finished. Respond with a brief status update like "Plan execution ongoing."
-2. If the 'ghidra_plan' IS empty, evaluate the 'current_analysis'. Does it sufficiently answer the 'user_query'? Consider any errors noted.
+1. Examine the 'ghidra_plan'. If it is NOT empty, the task is not finished. Respond with: "Plan execution ongoing."
+2. If the 'ghidra_plan' IS empty, evaluate the 'current_analysis'. Does it sufficiently answer the 'user_query'?
 3. If the plan is empty AND the query is answered: Respond ONLY with the exact word "STOP".
-4. If the plan is empty BUT the query is NOT answered: Respond with feedback for the Planner, e.g., "Analysis generated: [brief summary of current_analysis]. Query requires more detail on X. Planning needed."
+4. If the plan is empty BUT the query is NOT answered: Respond with: "Analysis incomplete. Additional planning needed."
 
-Output:
-- If task is complete: The single word "STOP".
-- Otherwise: A status message or feedback for the Planner.
-""",
-    # This agent's primary output determines loop continuation.
-    # The final answer is implicitly in the 'current_analysis' state when Reviewer returns 'STOP'.
+Your response MUST be just a simple string with no JSON or special formatting.
+"""
+
+review_agent = LlmAgent(
+    name="Reviewer",
+    model=LLM_INSTANCE,
+    instruction=REVIEWER_INSTRUCTION,
 )
 
 # --- Main Loop Agent ---
@@ -307,17 +320,16 @@ def build_ghidra_analyzer_pipeline(llm=None):
     planning = LlmAgent(
         name="Planner",
         model=model,
-        instruction=PLANNER_INSTRUCTION_WITH_EXIT,
-        tools=[exit_loop] + ALL_GHIDRA_TOOLS,
+        instruction=PLANNER_INSTRUCTION_ROBUST,
         output_key="ghidra_plan"
     )
     
     executor = LlmAgent(
         name="Executor",
         model=model,
-        instruction=EXECUTOR_INSTRUCTION_SIMPLE,
+        instruction=EXECUTOR_INSTRUCTION_ROBUST,
         include_contents='none',
-        tools=ALL_GHIDRA_TOOLS,
+        tools=[exit_loop] + ALL_GHIDRA_TOOLS,
     )
     
     analyzer = LlmAgent(
@@ -330,26 +342,7 @@ def build_ghidra_analyzer_pipeline(llm=None):
     reviewer = LlmAgent(
         name="Reviewer",
         model=model,
-        instruction="""
-You are the Review Agent.
-Your role is to check if the Ghidra analysis task is complete and the user query is answered.
-
-Input State Keys:
-- user_query: The original user query.
-- ghidra_plan: The list of remaining planned tool calls.
-- current_analysis: The accumulated analysis so far.
-- last_tool_result (optional): The result of the very last tool call.
-
-Decision Logic:
-1. Examine the 'ghidra_plan'. If it is NOT empty, the task is not finished. Respond with a brief status update like "Plan execution ongoing."
-2. If the 'ghidra_plan' IS empty, evaluate the 'current_analysis'. Does it sufficiently answer the 'user_query'? Consider any errors noted.
-3. If the plan is empty AND the query is answered: Respond ONLY with the exact word "STOP".
-4. If the plan is empty BUT the query is NOT answered: Respond with feedback for the Planner, e.g., "Analysis generated: [brief summary of current_analysis]. Query requires more detail on X. Planning needed."
-
-Output:
-- If task is complete: The single word "STOP".
-- Otherwise: A status message or feedback for the Planner.
-"""
+        instruction=REVIEWER_INSTRUCTION,
     )
     
     # Create and return the loop agent
