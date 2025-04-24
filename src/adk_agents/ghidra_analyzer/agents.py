@@ -158,36 +158,123 @@ planning_agent = LlmAgent(
 )
 
 # 2. Tool Execution Agent - Modified to handle the JSON directly
-EXECUTOR_INSTRUCTION_ROBUST = """
+EXECUTOR_INSTRUCTION_NO_FUNCTION_CALLING = """
 You are the Tool Execution Agent for a Ghidra analysis task.
 
-Your task is to:
+CRITICAL INFORMATION: DO NOT USE FUNCTION CALLING IN YOUR RESPONSE. Only respond with plain JSON.
+
+Follow these steps exactly:
 1. Examine the 'ghidra_plan' state key, which contains a list of planned tool calls.
-2. If the list is empty, respond with: {"status": "no_plan", "message": "No tool calls in plan."}
-3. If the list contains an object with {"exit_loop": true}, call the exit_loop() function.
-4. Otherwise, take the first tool call from the list and execute it exactly as specified.
+2. If the list is empty, respond with this exact JSON: {"status": "no_plan", "message": "No tool calls in plan."}
+3. If the list contains an object with {"exit_loop": true}, note this in your response as: {"status": "exit", "message": "Exit loop requested"}
+4. Otherwise, extract the first tool call from the list. Note the tool_name and parameters for manual execution.
 
-For executing a tool call:
-- Extract the 'tool_name' and 'parameters' from the first item in the ghidra_plan list.
-- Execute the specified tool with the exact parameters provided.
-- Create a result dictionary: {"status": "success", "data": result} or {"status": "error", "message": error_message}
-- Store this result dictionary in 'last_tool_result' state key.
-- Update 'ghidra_plan' by removing the executed step.
-- Respond with a JSON object: {"status": "executed", "tool": tool_name, "success": true/false}
+For step 4, format your response as the following JSON:
+{
+  "action": "execute_tool",
+  "tool_name": "[extracted tool name]",
+  "parameters": [extracted parameters object],
+  "remove_from_plan": true
+}
 
-Example Response:
-{"status": "executed", "tool": "ghidra_list_functions", "success": true}
+Example response for a ghidra_list_functions tool call:
+{"action":"execute_tool","tool_name":"ghidra_list_functions","parameters":{},"remove_from_plan":true}
 
-ONLY respond with JSON. DO NOT add any explanation or text before or after the JSON.
+DO NOT format this as a function call. Instead, provide a plain JSON object that the ADK system can parse to identify what tool to execute.
+CRITICAL: DO NOT include any text, explanation, or markdown outside of the JSON.
 """
 
 tool_executor_agent = LlmAgent(
     name="Executor",
     model=LLM_INSTANCE,
-    instruction=EXECUTOR_INSTRUCTION_ROBUST,
+    instruction=EXECUTOR_INSTRUCTION_NO_FUNCTION_CALLING,
     include_contents='none',
-    tools=[exit_loop] + ALL_GHIDRA_TOOLS,  # Include the exit_loop tool
+    # Explicitly remove tools parameter to avoid function calling altogether
+    # The handler function will process the JSON response and call the appropriate tool
 )
+
+# --- Executor Agent Helper Functions ---
+
+def handle_executor_response(event, state):
+    """
+    Process the executor agent's JSON response and execute the appropriate tool.
+    This function is called by the after_model_callback.
+    """
+    try:
+        # Get the executor response
+        executor_json = json.loads(event.get_text())
+        
+        # Handle empty plan
+        if executor_json.get("status") == "no_plan":
+            return {"status": "no_plan", "message": "No tool calls in plan."}
+            
+        # Handle exit loop
+        if executor_json.get("status") == "exit":
+            # Actually call exit_loop to stop the loop agent
+            try:
+                from google.adk.tools import exit_loop as exit_loop_func
+                # Call exit_loop with a mock context
+                class MockContext:
+                    def __getattr__(self, name):
+                        return lambda *args, **kwargs: None
+                exit_loop_func(MockContext())
+            except Exception as e:
+                logger.warning(f"Failed to call exit_loop: {e}")
+            return {"status": "exit", "message": "Exit loop requested"}
+            
+        # Handle tool execution request
+        if executor_json.get("action") == "execute_tool":
+            tool_name = executor_json.get("tool_name")
+            parameters = executor_json.get("parameters", {})
+            
+            # Special case for exit_loop
+            if tool_name == "exit_loop":
+                # Actually call exit_loop to stop the loop agent
+                try:
+                    from google.adk.tools import exit_loop as exit_loop_func
+                    # Call exit_loop with a mock context
+                    class MockContext:
+                        def __getattr__(self, name):
+                            return lambda *args, **kwargs: None
+                    exit_loop_func(MockContext())
+                except Exception as e:
+                    logger.warning(f"Failed to call exit_loop: {e}")
+                return {"status": "exit", "message": "Exit loop requested"}
+            
+            # Find the tool in ALL_GHIDRA_TOOLS
+            tool_func = None
+            for tool in ALL_GHIDRA_TOOLS:
+                if tool.name == tool_name:
+                    tool_func = tool.func
+                    break
+                    
+            if tool_func is None:
+                return {"status": "error", "message": f"Tool '{tool_name}' not found"}
+                
+            # Execute the tool with parameters
+            try:
+                result = tool_func(**parameters)
+                
+                # If we should remove from plan, update the state
+                if executor_json.get("remove_from_plan", False) and "ghidra_plan" in state:
+                    if state["ghidra_plan"] and len(state["ghidra_plan"]) > 0:
+                        # Remove the first item from the plan
+                        state["ghidra_plan"] = state["ghidra_plan"][1:]
+                
+                # Return success result
+                return {"status": "success", "data": result, "tool": tool_name}
+                
+            except Exception as e:
+                return {"status": "error", "message": str(e), "tool": tool_name}
+        
+        # Default return for unrecognized format
+        return {"status": "error", "message": "Invalid executor response format"}
+        
+    except Exception as e:
+        return {"status": "error", "message": f"Error processing executor response: {str(e)}"}
+
+# Modify the executor agent to use our handler
+tool_executor_agent.after_model_callback = handle_executor_response
 
 # 3. Analysis Agent - Keep this one mostly the same but reinforce JSON avoidance
 ANALYZER_INSTRUCTION_STRICT = """
@@ -327,10 +414,13 @@ def build_ghidra_analyzer_pipeline(llm=None):
     executor = LlmAgent(
         name="Executor",
         model=model,
-        instruction=EXECUTOR_INSTRUCTION_ROBUST,
+        instruction=EXECUTOR_INSTRUCTION_NO_FUNCTION_CALLING,
         include_contents='none',
-        tools=[exit_loop] + ALL_GHIDRA_TOOLS,
+        # Explicitly remove tools parameter to avoid function calling
     )
+    
+    # Add our custom handler to the executor agent
+    executor.after_model_callback = handle_executor_response
     
     analyzer = LlmAgent(
         name="Analyzer",

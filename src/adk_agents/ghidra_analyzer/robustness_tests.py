@@ -229,6 +229,78 @@ class RobustnessTests(unittest.TestCase):
             except Exception as e:
                 self.fail(f"Should handle Ollama function call format, but threw: {e}")
 
+    def test_updated_executor_no_function_calls(self):
+        """
+        Test the updated Executor agent that completely avoids function calling.
+        This test verifies our fix for the KeyError: 'name' issue.
+        """
+        logger.info("Testing updated Executor agent without function calling")
+        
+        # Create a mock state with a ghidra_plan containing a tool call
+        state = {
+            "user_query": "List all functions",
+            "ghidra_plan": [
+                {"tool_name": "ghidra_list_functions", "parameters": {}}
+            ],
+            "last_tool_result": None
+        }
+        
+        # Mock LiteLLM to return a JSON response without function calling
+        with patch('litellm.completion') as mock_completion:
+            mock_completion.return_value = {
+                "choices": [{
+                    "message": {
+                        "content": json.dumps({
+                            "action": "execute_tool",
+                            "tool_name": "ghidra_list_functions",
+                            "parameters": {},
+                            "remove_from_plan": True
+                        })
+                    }
+                }]
+            }
+            
+            # Import the executor agent with updated implementation
+            from src.adk_agents.ghidra_analyzer.agents import tool_executor_agent, handle_executor_response
+            
+            try:
+                # First just test the prediction
+                result = self.executor_agent._instruction_model.predict(state)
+                logger.info(f"Executor prediction result: {result}")
+                
+                # Verify the result is valid JSON
+                exec_result = json.loads(result)
+                self.assertEqual(exec_result.get("action"), "execute_tool", 
+                               "Executor should return an action object, not a function call")
+                self.assertEqual(exec_result.get("tool_name"), "ghidra_list_functions", 
+                               "Executor should specify tool name")
+                
+                # Now test the handler
+                # Create a mock event with the result
+                class MockEvent:
+                    def get_text(self):
+                        return result
+                
+                # Mock the tool function to return a test result
+                with patch('src.adk_tools.ghidra_mcp.ghidra_list_functions', 
+                         return_value=["main", "test_func"]):
+                    
+                    # Call the handler
+                    handler_result = handle_executor_response(MockEvent(), state)
+                    logger.info(f"Handler result: {handler_result}")
+                    
+                    # Verify the handler result
+                    self.assertEqual(handler_result.get("status"), "success", 
+                                   "Handler should return success status")
+                    self.assertEqual(handler_result.get("tool"), "ghidra_list_functions", 
+                                   "Handler should include the tool name")
+                    self.assertEqual(state.get("ghidra_plan"), [], 
+                                   "Handler should update the ghidra_plan state")
+                
+                logger.info("Updated Executor agent and handler work correctly")
+            except Exception as e:
+                self.fail(f"Updated Executor test failed with error: {e}")
+
     def test_full_loop_with_errors(self):
         """
         Test a full loop with simulated LiteLLM errors that get resolved.
