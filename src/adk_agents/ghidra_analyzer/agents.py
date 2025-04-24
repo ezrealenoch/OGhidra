@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from google.adk.agents import LlmAgent, LoopAgent
 from google.adk.models.lite_llm import LiteLlm
 from google.adk.tools import FunctionTool, exit_loop
+from pydantic import BaseModel, Field # <-- Add BaseModel import
 
 # --- Configuration ---
 load_dotenv() # Load .env file if present
@@ -110,7 +111,7 @@ def _format_tool_list_for_prompt(tools: List[FunctionTool]) -> str:
             lines.append(f"- `{tool.name}`: (Error formatting description)")
     return "\n".join(lines)
 
-# Modified planner instruction to avoid function calling issues with Ollama/LiteLLM
+# Modified planner instruction to be less proactive
 PLANNER_INSTRUCTION_ROBUST = f"""
 You are the Planning Agent for a Ghidra analysis task.
 
@@ -119,7 +120,7 @@ respond with: {{"exit_loop": true}}
 
 If the query is NOT "EXIT LOOP", proceed with the following planning task:
 Your goal is to analyze the user's query and the current state (including past tool results and analysis)
-and create a step-by-step plan of Ghidra tool calls required to gather the necessary information.
+and create a **minimal step-by-step plan** of Ghidra tool calls required to **directly gather the information requested by the user_query**.
 
 Available Tools (Use EXACT names and provide ONLY the required parameters):
 {_format_tool_list_for_prompt(ALL_GHIDRA_TOOLS)}
@@ -128,18 +129,25 @@ Input State Keys:
 - user_query: The original request from the user.
 - last_tool_result (optional): The result from the previous tool execution, including status ('success' or 'error') and result/message.
 - current_analysis (optional): The analysis synthesized so far.
-- ghidra_plan (optional): The existing plan (list of dictionaries), if refining.
+- ghidra_plan (optional): The existing plan (list of dictionaries), if refining (usually based on Reviewer feedback).
 
-**IMPORTANT**: 
+**CRITICAL PLANNING RULES**:
+- Generate the *minimum* number of tool calls necessary to directly answer the `user_query`.
+- Do **NOT** plan for deeper analysis (like decompilation of all functions) unless the `user_query` specifically asks for it OR the Reviewer agent has explicitly requested a revised plan with instructions for deeper analysis.
+- If the query is simply to list items (e.g., "list functions"), your plan should contain ONLY the corresponding listing tool call (e.g., `ghidra_list_functions`).
 - Your response MUST be in JSON format.
 - For queries that are NOT "EXIT LOOP", output a JSON list of dictionaries, where each dictionary represents a single tool call.
 - Each dictionary MUST have 'tool_name' and 'parameters' (a dictionary of arguments for that specific tool).
 - If a tool takes no arguments, the 'parameters' dictionary MUST be empty: {{}}.
-- If no tool calls are needed, output an empty list: [].
+- If no tool calls are needed based on the query and current state (e.g., query already answered), output an empty list: [].
 
-Example response for a standard query:
+Example response for query "List functions":
 [
-  {{"tool_name": "ghidra_list_functions", "parameters": {{}}}},
+  {{"tool_name": "ghidra_list_functions", "parameters": {{}}}}
+]
+
+Example response for query "Decompile main":
+[
   {{"tool_name": "ghidra_decompile_function_by_name", "parameters": {{"function_name": "main"}}}}
 ]
 
@@ -150,15 +158,15 @@ DO NOT explain your reasoning or add any text before or after the JSON.
 ONLY respond with the JSON array of tool calls or the exit_loop object.
 """
 
-# 1. Planning Agent - Modified to work with LiteLLM and Ollama
+# 1. Planning Agent - Modified to be less proactive
 planning_agent = LlmAgent(
     name="Planner",
     model=LLM_INSTANCE,
-    instruction=PLANNER_INSTRUCTION_ROBUST,  # Use the robust instruction that doesn't rely on function calling
-    output_key="ghidra_plan"  # Output the plan to this state key
+    instruction=PLANNER_INSTRUCTION_ROBUST,
+    output_key="ghidra_plan" 
 )
 
-# 2. Tool Execution Agent - Modified to handle the JSON directly
+# 2. Tool Execution Agent - No changes needed here, handler bypasses LLM
 EXECUTOR_INSTRUCTION_NO_FUNCTION_CALLING = """
 You are the Tool Execution Agent for a Ghidra analysis task.
 
@@ -194,30 +202,31 @@ tool_executor_agent = LlmAgent(
     # The handler function will process the JSON response and call the appropriate tool
 )
 
-# 3. Analysis Agent - Interprets the tool results
+# 3. Analysis Agent - Modified to include results directly
 ANALYZER_INSTRUCTION_STRICT = """
 You are the Analysis Agent for a Ghidra binary analysis task.
 
-Your role is to analyze the outputs from Ghidra tools and provide insights about the binary.
+Your role is to analyze the outputs from Ghidra tools (`last_tool_result`) and provide insights, updating `current_analysis`.
 
-IMPORTANT: Return only plain text analysis. DO NOT return JSON, function calls, or tool usage suggestions. 
-Analyze what has been discovered, not what could be discovered.
+IMPORTANT:
+- Return only plain text analysis. DO NOT return JSON, function calls, or tool usage suggestions.
+- Analyze ONLY what has been discovered via the tools. Do not speculate or suggest future steps.
+- **If the last tool was 'ghidra_list_functions' and it was successful, your analysis MUST begin with the exact phrase 'The following functions were found:' followed by a newline and then the list of functions from the tool result's 'result' field. You may add a brief summary sentence after the list.**
+- **Similarly, if the last tool was 'ghidra_decompile_function_by_address' or 'ghidra_decompile_function_by_name' and was successful, include the decompiled code from the 'result' field in your analysis, perhaps indicating which function it belongs to.**
 
 Input state:
-- user_query: The original user query.
-- last_tool_result: The most recent tool execution result.
-- current_analysis: The analysis synthesized so far, which you should build upon.
-- ghidra_plan: The remaining plan items.
+- user_query: The original user query (for context only).
+- last_tool_result: The most recent tool execution result (check 'status' and 'result' fields).
+- current_analysis: The analysis synthesized so far (build upon this if appropriate, but focus on the latest result).
+- ghidra_plan: The remaining plan items (for context only).
 
 Guidelines:
-1. Focus on the most recent tool result and its implications.
-2. Highlight potential security vulnerabilities, code patterns, and function purposes.
-3. Be specific about addresses, function names, and code structure.
-4. Build upon prior analysis without excessive repetition.
-5. If encountering errors from tools, indicate what might be missing or wrong and suggest refinements.
-6. Use clear, concise language, prioritizing accuracy over verbosity.
+1. Focus analysis *strictly* on the data provided in `last_tool_result`.
+2. If `last_tool_result` indicates an error, describe the error message.
+3. Build upon `current_analysis` only if synthesizing multiple results. If processing a single result, start fresh or clearly delineate the new findings.
+4. Use clear, concise language, prioritizing accuracy.
 
-Return ONLY textual analysis without any special formatting or JSON structures.
+Return ONLY the textual analysis to be stored in `current_analysis`.
 """
 
 analysis_agent = LlmAgent(
@@ -227,35 +236,68 @@ analysis_agent = LlmAgent(
     output_key="current_analysis"
 )
 
-# 4. Review Agent - Evaluates progress and suggests next steps
-REVIEWER_INSTRUCTION = """
+# --- Reviewer Agent Schema and Prompt ---
+
+class ReviewerDecision(BaseModel):
+    """Schema for the Reviewer agent's structured output."""
+    directive: str = Field(description="The chosen directive: CONTINUE, REVISE_PLAN, FINAL_ANSWER, or EXIT_LOOP.")
+    reason: str = Field(description="A brief explanation for the chosen directive.")
+    # ADK's LoopAgent should recognize 'escalate' in EventActions, which can be influenced by output schema mapping
+    # Let's map the decision directly to an 'escalate' flag.
+    escalate: bool = Field(default=False, description="Set to true if directive is FINAL_ANSWER or EXIT_LOOP to stop the loop.")
+
+REVIEWER_INSTRUCTION_STRUCTURED = f"""
 You are the Review Agent for a Ghidra binary analysis task.
 
-Your role is to evaluate the current state of the analysis and determine what to do next:
-1. Continue with the existing plan if results are good and more steps remain.
-2. Suggest refining or creating a new plan if we're encountering errors or got unexpected results.
-3. Conclude and summarize when the user query has been sufficiently answered.
-4. Explicitly request to exit the loop if the analysis seems impossible, tools are consistently failing (check 'last_tool_result'), or the query cannot be answered with the available Ghidra tools.
+Your role is to evaluate the current state and determine the **single next action** based on the original `user_query`.
+Output your decision as a JSON object conforming to the following schema:
+
+```json
+{{
+  "directive": "CONTINUE | REVISE_PLAN | FINAL_ANSWER | EXIT_LOOP",
+  "reason": "Brief explanation for the directive.",
+  "escalate": true | false
+}}
+```
+
+**CRITICAL: Evaluate completion based *only* on the original `user_query`. Has the information *explicitly requested* by the user been provided in `current_analysis` or `last_tool_result`?**
 
 Input State:
-- user_query: The original user question.
+- user_query: The original user question. **Adhere strictly to this query's scope.**
 - current_analysis: Analysis generated by the Analysis Agent.
-- ghidra_plan: The remaining planned tool calls.
+- ghidra_plan: The remaining planned tool calls. An empty list means the current plan is finished.
 - last_tool_result: The most recent tool execution result (check status: 'success' or 'error').
 
-Provide your response as ONLY ONE of the following directives based on your evaluation:
-- If more tool calls from the plan are needed: "CONTINUE: <brief explanation>"
-- If the plan needs revision due to errors or unexpected results: "REVISE_PLAN: <explanation of what's needed>"
-- If the analysis is complete and answers the query: "FINAL_ANSWER: <comprehensive summary answering the user query>"
-- If the task should stop due to consistent errors or impossibility: "EXIT_LOOP: <reason, e.g., Consistent tool errors, Binary incompatible, Query unanswerable>"
+**Decision Logic & Output Format:**
 
-Only provide the most appropriate single directive from the options above.
+1.  **CONTINUE:** If the current `ghidra_plan` is **not empty** and the last tool executed successfully (`last_tool_result['status'] == 'success'`), continue executing the plan.
+    JSON Output: `{{"directive": "CONTINUE", "reason": "Proceeding with planned steps.", "escalate": false}}`
+
+2.  **REVISE_PLAN:** If `last_tool_result` indicates an error or the `current_analysis` reveals that the current plan is insufficient or incorrect for the `user_query`.
+    JSON Output: `{{"directive": "REVISE_PLAN", "reason": "<Explain why plan needs revision>", "escalate": false}}`
+
+3.  **FINAL_ANSWER:** If the `user_query` has been **fully and directly addressed** by the information now present in `current_analysis` (or `last_tool_result` if analysis is simple), and the `ghidra_plan` is empty. Do **NOT** proceed with deeper analysis if the user didn't ask for it.
+    JSON Output: `{{"directive": "FINAL_ANSWER", "reason": "<Explain how query is answered>", "escalate": true}}`
+
+4.  **EXIT_LOOP:** If analysis seems impossible, tools are consistently failing, or the `user_query` cannot be answered.
+    JSON Output: `{{"directive": "EXIT_LOOP", "reason": "<Explain reason for exiting>", "escalate": true}}`
+
+**Decision Logic Summary:**
+- Is plan non-empty & last tool OK? -> CONTINUE, escalate: false
+- Did last tool fail OR plan wrong? -> REVISE_PLAN, escalate: false
+- Is plan empty AND query satisfied? -> FINAL_ANSWER, escalate: true
+- Is task impossible/failing? -> EXIT_LOOP, escalate: true
+
+Return ONLY the JSON object representing your decision. Do not add any other text.
 """
 
 review_agent = LlmAgent(
     name="Reviewer",
     model=LLM_INSTANCE,
-    instruction=REVIEWER_INSTRUCTION,
+    instruction=REVIEWER_INSTRUCTION_STRUCTURED, # Use new structured prompt
+    output_schema=ReviewerDecision,             # Set the output schema
+    output_key="reviewer_decision"              # Store the structured output here
+    # NO after_agent_callback needed anymore
 )
 
 # --- Main Loop Agent ---
@@ -267,7 +309,7 @@ agent = LoopAgent(
         planning_agent,
         tool_executor_agent,
         analysis_agent,
-        review_agent
+        review_agent # Reviewer is last
     ],
     max_iterations=10, # Limit the number of loops
     description="An agent that analyzes Ghidra projects by planning and executing Ghidra tool calls."
@@ -300,7 +342,7 @@ def handle_executor_response(callback_context=None, llm_response=None, event=Non
         
         if not current_state:
              logger.error("Executor Handler: Could not retrieve state.")
-             if state: state['last_tool_result'] = {"status": "error", "message": "Internal error: State not found in handler."}
+             # Avoid modifying state if we couldn't retrieve it
              return None # Must return None from callback
 
         # --- Process ghidra_plan from State --- 
@@ -311,34 +353,32 @@ def handle_executor_response(callback_context=None, llm_response=None, event=Non
             try:
                 ghidra_plan = json.loads(ghidra_plan)
                 if not isinstance(ghidra_plan, list):
-                     logger.warning(f"Executor Handler: Parsed ghidra_plan from string, but it's not a list: {type(ghidra_plan)}")
+                     logger.warning(f"Executor Handler: Parsed ghidra_plan from string, but it's not a list: {{type(ghidra_plan)}}")
                      ghidra_plan = [] # Treat as invalid plan
                 else:
                      logger.info("Executor Handler: Successfully parsed ghidra_plan from JSON string in state.")
                      # Update state with the parsed list
                      current_state['ghidra_plan'] = ghidra_plan 
             except json.JSONDecodeError:
-                logger.error(f"Executor Handler: ghidra_plan in state was a string but failed to parse as JSON: '{ghidra_plan[:100]}...'")
+                logger.error(f"Executor Handler: ghidra_plan in state was a string but failed to parse as JSON: '{{ghidra_plan[:100]}}...'")
                 ghidra_plan = [] # Treat as invalid plan
 
         if not isinstance(ghidra_plan, list):
-            logger.error(f"Executor Handler: ghidra_plan in state is not a list or valid JSON string. Type: {type(ghidra_plan)}. Value: {str(ghidra_plan)[:100]}...")
-            tool_result = {"status": "error", "message": f"Internal error: Invalid ghidra_plan format in state ({type(ghidra_plan)})."}
-            # ghidra_plan = [] # Resetting here might hide the error, let the check below handle empty list
+            logger.error(f"Executor Handler: ghidra_plan in state is not a list or valid JSON string. Type: {{type(ghidra_plan)}}. Value: {{str(ghidra_plan)[:100]}}...")
+            tool_result = {"status": "error", "message": f"Internal error: Invalid ghidra_plan format in state ({{type(ghidra_plan)}})."}
+            ghidra_plan = [] # Reset plan to prevent further errors in this handler run
 
         # --- Determine Action based on Plan --- 
-        # Check if the plan (now guaranteed to be a list or reset if invalid) is empty
         if not ghidra_plan: 
             logger.info("Executor Handler: ghidra_plan is empty or invalid.")
-            # If tool_result was already set due to invalid format, use that, otherwise set no_plan
-            if tool_result is None:
+            if tool_result is None: # Only set no_plan if not already an error
                 tool_result = {"status": "no_plan", "message": "No tool calls remaining in plan or plan was invalid."}
         else:
             # Get the first planned tool call
             next_tool_call = ghidra_plan[0]
-            tool_name = None # Define tool_name here for broader scope
+            tool_name = None 
             if not isinstance(next_tool_call, dict):
-                logger.error(f"Executor Handler: First item in ghidra_plan is not a dictionary: {next_tool_call}")
+                logger.error(f"Executor Handler: First item in ghidra_plan is not a dictionary: {{next_tool_call}}")
                 tool_result = {"status": "error", "message": f"Internal error: Invalid item format in ghidra_plan."}
             else:
                 tool_name = next_tool_call.get("tool_name")
@@ -346,17 +386,8 @@ def handle_executor_response(callback_context=None, llm_response=None, event=Non
 
                 if not tool_name:
                     tool_result = {"status": "error", "message": "Plan item missing 'tool_name'."}
-                elif tool_name == "exit_loop": # Handle explicit exit request from Planner
-                    tool_result = {"status": "exit", "message": "Exit loop requested by Planner."}
-                    try:
-                        from google.adk.tools import exit_loop as exit_loop_func
-                        class MockContext:
-                             def __getattr__(self, name): 
-                                 return lambda *args, **kwargs: None 
-                        exit_loop_func(callback_context if callback_context else MockContext())
-                        logger.info("Executor Handler: Called exit_loop ADK function based on plan.")
-                    except Exception as exit_e:
-                        logger.warning(f"Executor Handler: Failed to call exit_loop ADK function: {exit_e}")
+                # --- REMOVED exit_loop handling here - let Planner/Reviewer handle loop termination ---
+                # elif tool_name == "exit_loop": ... 
                 else:
                     # Find and execute the actual tool
                     tool_func = None
@@ -366,58 +397,50 @@ def handle_executor_response(callback_context=None, llm_response=None, event=Non
                             break
 
                     if tool_func is None:
-                        tool_result = {"status": "error", "message": f"Tool '{tool_name}' specified in plan not found.", "tool": tool_name}
+                        tool_result = {"status": "error", "message": f"Tool '{{tool_name}}' specified in plan not found.", "tool": tool_name}
                     else:
                         # Execute the tool
                         try:
-                            # Ensure address has 0x prefix if tool requires it (based on previous findings)
+                            # Address prefix logic... (remains the same)
                             if tool_name in ["ghidra_rename_function_by_address", "ghidra_decompile_function_by_address", "ghidra_set_decompiler_comment", "ghidra_set_disassembly_comment"]:
-                                addr_key = 'address' if 'address' in parameters else 'function_address' # Handle potential variations
+                                addr_key = 'address' if 'address' in parameters else 'function_address' 
                                 if addr_key in parameters:
                                      addr_val = parameters[addr_key]
                                      if isinstance(addr_val, str) and not addr_val.startswith('0x') and addr_val.isalnum():
                                           parameters[addr_key] = "0x" + addr_val
-                                          logger.info(f"Executor Handler: Added '0x' prefix to address for tool '{tool_name}'. New params: {parameters}")
+                                          logger.info(f"Executor Handler: Added '0x' prefix to address for tool '{{tool_name}}'. New params: {{parameters}}")
                                 
-                            logger.info(f"Executor Handler: Executing tool '{tool_name}' from plan with params: {parameters}")
+                            logger.info(f"Executor Handler: Executing tool '{{tool_name}}' from plan with params: {{parameters}}")
                             result = tool_func(**parameters)
-                            # Store the raw result, subsequent agents will interpret it
-                            tool_result = result # Use the direct result dict {'status': ..., 'result': ...} or {'status': ..., 'message': ...}
-                            logger.info(f"Executor Handler: Tool '{tool_name}' executed. Result status: {tool_result.get('status')}")
+                            tool_result = result 
+                            logger.info(f"Executor Handler: Tool '{{tool_name}}' executed. Result status: {{tool_result.get('status')}}")
 
                         except Exception as exec_e:
-                            logger.error(f"Executor Handler: Error executing tool '{tool_name}'. Error: {exec_e}", exc_info=True)
-                            tool_result = {"status": "error", "message": f"Error executing {tool_name}: {str(exec_e)}", "tool": tool_name}
+                            logger.error(f"Executor Handler: Error executing tool '{{tool_name}}'. Error: {{exec_e}}", exc_info=True)
+                            tool_result = {"status": "error", "message": f"Error executing {{tool_name}}: {{str(exec_e)}}", "tool": tool_name}
             
-            # If tool was processed (meaning we entered the 'else' block for non-empty plan),
-            # remove the first item from the plan list in the state.
-            # This happens regardless of tool success/failure/not_found.
+            # Remove the processed tool call from the plan
             if current_state and "ghidra_plan" in current_state and isinstance(current_state["ghidra_plan"], list) and len(current_state["ghidra_plan"]) > 0:
-                # Make sure tool_name was actually set before logging removal
                 removed_tool_name = tool_name if tool_name else "(invalid item)"
                 current_state["ghidra_plan"] = current_state["ghidra_plan"][1:]
-                logger.info(f"Executor Handler: Removed tool '{removed_tool_name}' from plan. Remaining: {len(current_state['ghidra_plan'])}")
+                logger.info(f"Executor Handler: Removed tool '{{removed_tool_name}}' from plan. Remaining: {{len(current_state['ghidra_plan'])}}")
 
         # --- Update State --- 
         if tool_result is not None:
-            # Ensure the result has a status, default to error if missing
             if not isinstance(tool_result, dict) or 'status' not in tool_result:
-                 logger.warning(f"Executor Handler: Tool '{tool_name if 'tool_name' in locals() and tool_name else 'unknown'}' returned unexpected result format: {tool_result}. Wrapping as error.")
-                 tool_result = {"status": "error", "message": f"Tool returned unexpected format: {str(tool_result)[:200]}", "tool": tool_name if 'tool_name' in locals() and tool_name else 'unknown'}
+                 logger.warning(f"Executor Handler: Tool '{{tool_name if 'tool_name' in locals() and tool_name else 'unknown'}}' returned unexpected result format: {{tool_result}}. Wrapping as error.")
+                 tool_result = {"status": "error", "message": f"Tool returned unexpected format: {{str(tool_result)[:200]}}", "tool": tool_name if 'tool_name' in locals() and tool_name else 'unknown'}
             current_state['last_tool_result'] = tool_result
-            logger.debug(f"Executor Handler: Updated state['last_tool_result'] = {str(tool_result)[:500]}") # Log truncated result
+            logger.debug(f"Executor Handler: Updated state['last_tool_result'] = {{str(tool_result)[:500]}}") 
         else:
-             # This case might be reached if the plan item was invalid but tool_result wasn't explicitly set
              logger.warning("Executor Handler: tool_result was None after processing. Setting generic error.")
              current_state['last_tool_result'] = {"status": "error", "message": "Internal error: Tool result processing failed in handler."}
 
     except Exception as e:
-        # Catch any unexpected errors during handler execution
-        logger.error(f"Executor Handler: Unhandled exception: {str(e)}", exc_info=True)
-        if current_state:
-            current_state['last_tool_result'] = {"status": "error", "message": f"Critical error in executor handler: {str(e)}"}
+        logger.error(f"Executor Handler: Unhandled exception: {{str(e)}}", exc_info=True)
+        if current_state: # Check if current_state was successfully retrieved before trying to modify it
+            current_state['last_tool_result'] = {"status": "error", "message": f"Critical error in executor handler: {{str(e)}}"}
         
-    # IMPORTANT: after_model_callback must return None or an LlmResponse.
     return None
 
 
