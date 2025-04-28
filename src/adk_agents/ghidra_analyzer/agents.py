@@ -72,14 +72,23 @@ if not OLLAMA_MODEL_NAME.startswith("ollama/") and not OLLAMA_MODEL_NAME.startsw
 else:
     OLLAMA_MODEL_STRING = OLLAMA_MODEL_NAME
 
+# Ensure we have a valid OLLAMA_API_BASE
 if not os.getenv("OLLAMA_API_BASE"):
     os.environ["OLLAMA_API_BASE"] = "http://localhost:11434"
     logger.info(f"OLLAMA_API_BASE not set, defaulting to {os.environ['OLLAMA_API_BASE']}")
 else:
      logger.info(f"Using OLLAMA_API_BASE from environment: {os.environ['OLLAMA_API_BASE']}")
 
-LLM_INSTANCE = LiteLlm(model=OLLAMA_MODEL_STRING)
-logger.info(f"Using Ollama model via LiteLLM: {OLLAMA_MODEL_STRING}")
+# Initialize LiteLLM with proper error handling
+try:
+    # Force sync before initializing to avoid common connection issues
+    logger.info(f"Initializing LiteLLM with model: {OLLAMA_MODEL_STRING}, API Base: {os.environ['OLLAMA_API_BASE']}")
+    LLM_INSTANCE = LiteLlm(model=OLLAMA_MODEL_STRING)
+    logger.info(f"LiteLLM initialized successfully for model: {OLLAMA_MODEL_STRING}")
+except Exception as e:
+    logger.error(f"Failed to initialize LiteLLM: {e}. Will attempt to initialize on first use.")
+    # Create a placeholder - will try to initialize again when used
+    LLM_INSTANCE = None
 
 # --- Agent Definitions ---
 
@@ -131,6 +140,31 @@ Input State Keys:
 - current_analysis (optional): The analysis synthesized so far.
 - ghidra_plan (optional): The existing plan (list of dictionaries), if refining (usually based on Reviewer feedback).
 
+**PROJECT AND PROGRAM WORKFLOW:**
+1. Always start by checking the current state:
+   - First verify connection with verify_ghidra_mcp_connection
+   - Check current program with ghidra_get_current_program
+   - If the current program appears to be an example/sample (names like "example.exe", "hello_world"), include steps to load a real binary
+2. For analyzing a real application:
+   - Check available projects using ghidra_list_projects
+   - Open a specific project using ghidra_open_project with the project_path parameter
+   - List programs in the project using ghidra_list_programs 
+   - Open a specific program using ghidra_open_program with the program_name parameter
+   - You can also directly import a binary file using ghidra_import_file with a file_path parameter
+3. Once a real program is open, analyze it with the standard analysis functions.
+4. IMPORTANT: Avoid using mock or example data for analysis. The tool should work with real binaries.
+5. If an endpoint fails with 404 or similar errors, try alternative endpoints or approaches:
+   - Some GhidraMCP servers may not implement all endpoints
+   - Focus on core functions like ghidra_list_functions which are most commonly implemented
+6. Additional analysis functions available:
+   - ghidra_list_imports - Lists all imported functions
+   - ghidra_list_exports - Lists all exported functions
+   - ghidra_list_classes - Lists all classes in the program
+   - ghidra_get_class_methods - Gets methods for a specific class
+   - ghidra_get_function_references - Gets references to a function
+   - ghidra_analyze_program - Runs the Ghidra analyzer
+   - ghidra_search_strings - Searches for strings in the binary
+
 **CRITICAL PLANNING RULES**:
 - Generate the *minimum* number of tool calls necessary to directly answer the `user_query`.
 - Do **NOT** plan for deeper analysis (like decompilation of all functions) unless the `user_query` specifically asks for it OR the Reviewer agent has explicitly requested a revised plan with instructions for deeper analysis.
@@ -139,7 +173,9 @@ Input State Keys:
 - For queries that are NOT "EXIT LOOP", output a JSON list of dictionaries, where each dictionary represents a single tool call.
 - Each dictionary MUST have 'tool_name' and 'parameters' (a dictionary of arguments for that specific tool).
 - If a tool takes no arguments, the 'parameters' dictionary MUST be empty: {{}}.
-- If no tool calls are needed based on the query and current state (e.g., query already answered), output an empty list: [].
+- If no tool calls are needed based on the query (e.g., it's a greeting or nonsensical), output an empty list: [].
+- **Special Case:** If the user query is EXACTLY "EXIT", output the JSON: [{{\"tool_name\": \"exit_signal\"}}] instead of a plan.
+- If user asks to load/analyze a real application, include project/program management tools in your plan.
 
 Example response for query "List functions":
 [
@@ -153,6 +189,20 @@ Example response for query "Decompile main":
 
 Example response for "EXIT LOOP" query:
 {{"exit_loop": true}}
+
+Example response for query \"Load a real application instead of example data\":
+[
+  {{\"tool_name\": \"ghidra_list_projects\", \"parameters\": {{}}}},
+  {{\"tool_name\": \"ghidra_open_project\", \"parameters\": {{\"project_path\": \"<project_path_placeholder>\"}}}}
+]
+
+Example response for query \"Import a binary file\":
+[
+  {{\"tool_name\": \"ghidra_import_file\", \"parameters\": {{\"file_path\": \"/path/to/binary.exe\"}}}}
+]
+
+Example response for query \"EXIT\":
+[{{\"tool_name\": \"exit_signal\"}}]
 
 DO NOT explain your reasoning or add any text before or after the JSON.
 ONLY respond with the JSON array of tool calls or the exit_loop object.
@@ -454,3 +504,174 @@ tool_executor_agent.after_model_callback = handle_executor_response
 
 # --- __main__ block REMOVED --- 
 # if __name__ == '__main__': ... 
+
+class PlannerAgent(LlmAgent):
+    """Agent that creates a plan to answer a user's question using Ghidra."""
+    
+    name: str = "Planner"
+    instruction: str = """
+    You are a planning agent for Ghidra reverse engineering, tasked with creating a plan to answer the user's query using Ghidra tools.
+    
+    The available Ghidra tools are:
+    {available_tools}
+    
+    Create a plan with a list of ordered steps to execute. Each step should use a single Ghidra tool.
+    Focus on these tool types:
+    - First, always verify connectivity with "verify_ghidra_mcp_connection" as your first step
+    - Then check what's currently loaded with "ghidra_get_current_program"
+    - If the current program appears to be an example (e.g., "example.exe", "hello world"), add steps to load a real binary
+    - For real project/program information, use:
+      - ghidra_list_programs (to see available programs)
+      - ghidra_list_projects (to see available projects)
+      - ghidra_open_program/ghidra_open_project to load specific binaries
+    - Use function analysis tools like list_functions, decompile_function_by_name, etc.
+    - When decompiling, always check if a function exists first with ghidra_list_functions
+    
+    IMPORTANT: The goal is to work with real binaries, not example or test files.
+    
+    Some endpoints may not be available in the current GhidraMCP installation.
+    If a tool returns a "not found" or "not available" error, your next step should be to try an alternative tool or approach.
+    
+    For example, if "ghidra_get_current_program" fails with a 404 error, use "ghidra_list_functions" to at least verify basic functionality.
+    
+    Output a JSON list of steps. Each step should have:
+    1. "tool_name": The exact name of the function to call
+    2. "parameters": Required parameters for the function call 
+    3. "reason": Why this step is needed
+    
+    Example output:
+    [
+      {
+        "tool_name": "verify_ghidra_mcp_connection", 
+        "parameters": {}, 
+        "reason": "Verify the connection to the GhidraMCP server is working"
+      },
+      {
+        "tool_name": "ghidra_get_current_program",
+        "parameters": {},
+        "reason": "Check if we're analyzing a real binary or an example"
+      },
+      {
+        "tool_name": "ghidra_list_functions", 
+        "parameters": {}, 
+        "reason": "Get the list of all functions in the binary"
+      }
+    ]
+    
+    Provide concrete parameters, not placeholders. If the user asks about a specific function, address, or feature, include those details in the parameters.
+    For example, if they ask about "main", use "main" as a parameter value, not just "FUNCTION_NAME".
+    
+    If the query cannot be answered using Ghidra tools, return a plan that still verifies connectivity and gets basic information about the loaded program.
+    """
+    model: Optional[LiteLlm] = None  # Will be set in __post_init__
+    
+    def __post_init__(self):
+        """Initialize the model after construction."""
+        global LLM_INSTANCE
+        
+        # Check if LLM_INSTANCE needs to be initialized
+        if LLM_INSTANCE is None:
+            logger.info("LLM_INSTANCE was not initialized. Attempting initialization now...")
+            try:
+                LLM_INSTANCE = LiteLlm(model=OLLAMA_MODEL_STRING)
+                logger.info(f"Successfully initialized LLM_INSTANCE with model {OLLAMA_MODEL_STRING}")
+            except Exception as e:
+                logger.error(f"Failed to initialize LLM_INSTANCE: {e}")
+                # Use a fallback model if available (this could be an OpenAI model if configured)
+                try:
+                    fallback_model = "ollama/llama3" if OLLAMA_MODEL_STRING != "ollama/llama3" else "ollama/phi3"
+                    logger.info(f"Attempting with fallback model: {fallback_model}")
+                    LLM_INSTANCE = LiteLlm(model=fallback_model)
+                    logger.info(f"Successfully initialized with fallback model: {fallback_model}")
+                except Exception as e2:
+                    logger.error(f"Failed to initialize fallback model: {e2}")
+                    raise RuntimeError("Could not initialize any LLM model. Please check Ollama server and model availability.")
+        
+        # Set the model
+        self.model = LLM_INSTANCE
+        
+        # Format the available tools for the instruction
+        available_tools_str = _format_tool_list_for_prompt(ALL_GHIDRA_TOOLS)
+        self.instruction = self.instruction.format(available_tools=available_tools_str)
+    
+    def extract_json_from_text(self, text):
+        """Extract JSON content from a text string, which might contain markdown or other formatting."""
+        if not text:
+            return "[]"
+            
+        # Look for JSON content that may be wrapped in markdown code blocks
+        json_pattern = r'```(?:json)?\s*(\[[\s\S]*?\])\s*```'
+        match = re.search(json_pattern, text)
+        
+        if match:
+            # Extract from code block
+            return match.group(1)
+        else:
+            # Try to find a JSON array directly
+            array_pattern = r'\[\s*{[\s\S]*?}\s*\]'
+            match = re.search(array_pattern, text)
+            if match:
+                return match.group(0)
+            
+            # If still nothing, return the whole text as it might be valid JSON already
+            return text.strip()
+    
+    async def _run_async_impl(self, ctx):
+        """
+        Override the run implementation to load from state and format the user query.
+        """
+        state = ctx.state
+        user_query = state.get("user_query", "")
+        
+        if not user_query:
+            yield Event(
+                author="agent",
+                is_final_response=True,
+                content=[Part(text="No query provided. Please ask a question about a Ghidra project.")]
+            )
+            return
+        
+        logger.info(f"Planning steps to answer: '{user_query}'")
+        
+        # Construct a prompt with additional instructions about handling connectivity issues
+        prompt = f"""
+User Query: {user_query}
+
+Create a plan to answer this query using Ghidra tools.
+
+Remember:
+1. Always verify connectivity first
+2. Handle potential errors with alternative approaches
+3. Focus on real program data, not test samples
+"""
+        
+        # Pass the user query directly to the model
+        content = [{"text": prompt}]
+        
+        # Generate the plan
+        async for event in self.model.generate_content_async(
+            content,
+            generation_config=self.generate_content_config,
+        ):
+            # Extract the JSON plan from the response
+            response_text = event.text
+            logger.debug(f"Raw planning response: {response_text}")
+            
+            # Try to parse as JSON
+            try:
+                # Extract plan from potential markdown or text blocks
+                plan_text = self.extract_json_from_text(response_text)
+                plan = json.loads(plan_text)
+                
+                if isinstance(plan, list):
+                    logger.info(f"Planning complete: {len(plan)} steps created")
+                    ctx.state["ghidra_plan"] = plan
+                else:
+                    logger.warning(f"Invalid plan format: {plan}")
+                    ctx.state["ghidra_plan"] = []
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.error(f"Error parsing plan JSON: {e}")
+                ctx.state["ghidra_plan"] = []
+            
+            # Yield the event to let other agents see it
+            yield event

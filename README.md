@@ -62,13 +62,20 @@ Special commands:
 - Type `exit` or `quit` to exit
 - Type `health` to check connectivity to Ollama and GhidraMCP
 
-**Mock Mode:**
+**Mock Mode (Connectivity Testing Only):**
 
-If you don't have a GhidraMCP server running or want to test the bridge functionality:
+Note: Mock mode is strictly for connectivity testing and initial setup verification, NOT for actual binary analysis. In mock mode, all analysis operations will return error messages instead of example data.
 
 ```bash
 python main.py --interactive --mock
 ```
+
+The mock mode should only be used to:
+- Test that the bridge application itself is running correctly
+- Verify the Ollama API connectivity
+- Test command parsing and runtime flow
+
+For any actual binary analysis, you must have a real Ghidra instance with the GhidraMCP plugin running and connected to a real binary file.
 
 **Single Query:**
 
@@ -120,7 +127,8 @@ If you encounter 404 errors or empty responses from the GhidraMCP server:
 
 1. **Verify GhidraMCP server is running**: Make sure the GhidraMCP server script (`bridge_mcp_ghidra.py`) is running within Ghidra and accessible. Test with `curl http://localhost:8080/list_functions` (or your configured URL).
 2. **Check server URL**: Ensure the `GHIDRA_MCP_URL` in your environment/`.env` file (or the default `http://localhost:8080`) is correct, including the port.
-3. **Try mock mode** (`main.py --mock`) for the original bridge to isolate issues.
+3. **Test connectivity only** with mock mode (`main.py --mock`) for the original bridge to isolate connection issues, but remember this won't produce real analysis results.
+4. **Ensure a real binary is loaded** in your Ghidra instance, not just an example project.
 
 ### Ollama API Issues
 
@@ -135,6 +143,7 @@ If you encounter issues with the Ollama API:
 - **`ImportError`**: Ensure you run `pip install -r requirements.txt` from the project root.
 - **Tool Execution Errors**: Check the `adk web` console output for detailed error messages from the Ghidra tools or the agents. Ensure GhidraMCP is running and accessible.
 - **Planning/Looping Issues**: The LLM might struggle with complex plans or interpreting results. Try simplifying your query or adjusting agent instructions in `src/adk_agents/ghidra_analyzer/agents.py`.
+- **Empty or Generic Responses**: If responses reference "example.exe" or similar placeholder names, you may be connected to a default or test binary. Open a real binary in Ghidra.
 
 ### JSON Parsing Errors
 
@@ -143,6 +152,15 @@ If you see "Expecting value" or other JSON parsing errors (less likely with the 
 1. The API might be returning empty or non-JSON responses.
 2. Try running with `LOG_LEVEL=DEBUG` environment variable for more detailed logs.
 3. Check the API documentation to ensure proper request format.
+
+### Mock/Example Data Issues
+
+The system is designed to work with real binaries and warns when detecting potential example/test data. If you see warnings about mock data:
+
+1. **Check what's loaded in Ghidra**: Make sure you've opened a real binary file in Ghidra, not just the default "Hello World" example or similar test programs.
+2. **Disable MOCK_MODE**: Set `GHIDRA_MOCK_MODE=false` in your environment or `.env` file.
+3. **Open a real project/program**: Use Ghidra's UI to open a real binary, then use the agent to analyze it with commands like `ghidra_get_current_program` to verify.
+4. **Check the server responses**: If responses still show names like "example.exe", "hello_world", etc., it means you're still working with example data.
 
 ## Available GhidraMCP Commands (for reference)
 

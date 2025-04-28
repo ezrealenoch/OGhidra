@@ -8,6 +8,7 @@ to call functions within a running Ghidra instance via the GhidraMCP bridge.
 import os
 import httpx
 import logging
+import time
 from typing import List, Dict, Any, Optional
 
 # Configure basic logging
@@ -17,45 +18,195 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 # --- GhidraMCP Configuration ---
 GHIDRA_MCP_BASE_URL = os.getenv("GHIDRA_MCP_URL", "http://localhost:8080")
 GHIDRA_MCP_TIMEOUT = int(os.getenv("GHIDRA_MCP_TIMEOUT", "60")) # Increased timeout for potentially long operations
+MAX_CONNECTION_RETRIES = int(os.getenv("GHIDRA_MCP_RETRIES", "3"))
+
+# Attempt to connect to GhidraMCP server on module load
+def verify_ghidra_mcp_connection(max_retries=MAX_CONNECTION_RETRIES, retry_delay=2) -> Dict[str, Any]:
+    """
+    Verifies that the GhidraMCP server is running and accessible.
+    
+    Args:
+        max_retries: Maximum number of connection attempts
+        retry_delay: Delay in seconds between retries
+        
+    Returns:
+        A dictionary: {'status': 'success', 'result': 'Connected to GhidraMCP server at <url>'}
+        or {'status': 'error', 'message': '<error details>'}
+    """
+    logger.info(f"Verifying connection to GhidraMCP server at {GHIDRA_MCP_BASE_URL}")
+    
+    for attempt in range(max_retries):
+        try:
+            with httpx.Client(timeout=10) as client:  # Short timeout for quick check
+                response = client.get(f"{GHIDRA_MCP_BASE_URL}/ping")
+                
+                if response.status_code == 200:
+                    logger.info(f"Successfully connected to GhidraMCP server at {GHIDRA_MCP_BASE_URL}")
+                    return {"status": "success", "result": f"Connected to GhidraMCP server at {GHIDRA_MCP_BASE_URL}"}
+                else:
+                    logger.warning(f"GhidraMCP server responded with status code {response.status_code}")
+        except httpx.RequestError as exc:
+            logger.warning(f"Unable to connect to GhidraMCP server (attempt {attempt+1}/{max_retries}): {exc}")
+            
+        if attempt < max_retries - 1:
+            logger.info(f"Retrying connection in {retry_delay} seconds...")
+            time.sleep(retry_delay)
+    
+    error_message = f"Failed to connect to GhidraMCP server at {GHIDRA_MCP_BASE_URL} after {max_retries} attempts. " \
+                   f"Please ensure that:\n" \
+                   f"1. Ghidra is running\n" \
+                   f"2. The GhidraMCP plugin is installed and enabled\n" \
+                   f"3. The server is configured to run on {GHIDRA_MCP_BASE_URL}\n" \
+                   f"You can verify the port in Ghidra using Edit -> Tool Options -> GhidraMCP HTTP Server"
+    logger.error(error_message)
+    return {"status": "error", "message": error_message}
+
+# Try to verify connection at module load time
+connection_status = verify_ghidra_mcp_connection()
+if connection_status["status"] == "error":
+    logger.warning("Operating in disconnected mode. Some functions may not work properly.")
 
 # --- Internal Helper Functions ---
 
-def _make_ghidra_request(method: str, endpoint: str, params: Optional[Dict[str, Any]] = None, data: Optional[Any] = None) -> Dict[str, Any]:
+def _make_ghidra_request(
+    endpoint: str,
+    params: Dict = None,
+    data: Dict = None,
+    method: str = "GET",
+    retries: int = MAX_CONNECTION_RETRIES,
+    retry_delay: float = 1.0,
+    allow_endpoint_fallback: bool = True
+) -> Dict[str, Any]:
     """
-    Internal helper to make HTTP requests to the GhidraMCP server.
-
+    Make a request to the GhidraMCP server with retries and endpoint fallback.
+    
     Args:
-        method: HTTP method ('GET' or 'POST').
-        endpoint: The API endpoint path.
-        params: Dictionary of query parameters for GET requests.
-        data: Data payload for POST requests (can be dict or str).
-
+        endpoint: The endpoint to request (with or without 'ghidra_' prefix)
+        params: URL parameters for the request
+        data: JSON data for the request
+        method: HTTP method to use (GET or POST)
+        retries: Number of retries on connection errors
+        retry_delay: Delay between retries in seconds
+        allow_endpoint_fallback: Whether to try alternate endpoint format if first fails
+        
     Returns:
-        A dictionary containing the result:
-        {'status': 'success', 'result': <parsed_response>} or
-        {'status': 'error', 'message': <error_details>}
+        Dict: Response from GhidraMCP containing status and result
     """
+    # Handle mock mode
+    if MOCK_MODE:
+        return _get_mock_response(endpoint, params, data)
+        
+    # Set up request details
     url = f"{GHIDRA_MCP_BASE_URL}/{endpoint}"
-    headers = {'Content-Type': 'application/json'} if isinstance(data, dict) else {}
+    headers = {"Content-Type": "application/json"}
+    
+    # First attempt with original endpoint
+    response_data = _try_request(url, params, data, method, headers, retries, retry_delay)
+    
+    # If endpoint not found and fallback allowed, try with/without ghidra_ prefix
+    if (response_data.get("status") == "error" and 
+        response_data.get("error_type") == "endpoint_not_found" and 
+        allow_endpoint_fallback):
+        
+        # Determine alternate endpoint name
+        if endpoint.startswith("ghidra_"):
+            alternate_endpoint = endpoint[len("ghidra_"):]
+            logger.debug(f"Trying alternate endpoint without prefix: {alternate_endpoint}")
+        else:
+            alternate_endpoint = f"ghidra_{endpoint}"
+            logger.debug(f"Trying alternate endpoint with prefix: {alternate_endpoint}")
+        
+        # Try the alternate endpoint
+        alt_url = f"{GHIDRA_MCP_BASE_URL}/{alternate_endpoint}"
+        alt_response = _try_request(alt_url, params, data, method, headers, retries, retry_delay)
+        
+        # If alternate endpoint succeeded, return its result
+        if alt_response.get("status") == "success":
+            logger.info(f"Request succeeded with alternate endpoint: {alternate_endpoint}")
+            return alt_response
+        else:
+            # Both endpoints failed, return original error
+            logger.error(f"Both endpoints failed: {endpoint} and {alternate_endpoint}")
+            return response_data
+    
+    # Return result from original endpoint attempt
+    return response_data
 
-    try:
-        with httpx.Client(timeout=GHIDRA_MCP_TIMEOUT) as client:
-            logger.debug(f"Sending {method} to GhidraMCP: {url} | Params: {params} | Data: {data}")
-
-            if method.upper() == 'GET':
-                response = client.get(url, params=params or {})
-            elif method.upper() == 'POST':
-                if isinstance(data, dict):
-                    response = client.post(url, json=data, headers=headers)
-                elif isinstance(data, str):
-                     # GhidraMCP often expects raw string data for POST
-                    response = client.post(url, data=data.encode('utf-8'), headers={'Content-Type': 'text/plain'})
-                else:
-                    raise ValueError("Unsupported POST data type")
+def _try_request(
+    url: str, 
+    params: Dict, 
+    data: Dict, 
+    method: str,
+    headers: Dict,
+    retries: int,
+    retry_delay: float
+) -> Dict[str, Any]:
+    """
+    Helper function to attempt a request with retries.
+    
+    Args:
+        url: Full URL to request
+        params: URL parameters
+        data: JSON data for request body
+        method: HTTP method
+        headers: Request headers
+        retries: Number of retries for connection errors
+        retry_delay: Delay between retries in seconds
+        
+    Returns:
+        Dict: Response data with status and result
+    """
+    attempt = 0
+    
+    while attempt <= retries:
+        try:
+            logger.debug(f"Requesting {url} (attempt {attempt+1}/{retries+1})")
+            
+            if method.upper() == "GET":
+                response = httpx.get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
+            else:
+                response = httpx.post(url, json=data, headers=headers, timeout=REQUEST_TIMEOUT)
+            
+            # Check response status code
+            if response.status_code == 200:
+                # Successful response with content
+                try:
+                    result = response.json()
+                    return {"status": "success", "result": result}
+                except ValueError:
+                    return {"status": "error", "error_type": "invalid_json", "message": f"Invalid JSON response: {response.text[:100]}"}
+            
+            elif response.status_code == 204:
+                # Successful response with no content
+                return {"status": "success", "result": None}
+            
+            elif response.status_code == 404:
+                # Endpoint not found - but check if we got valid JSON data anyway
+                # Some GhidraMCP implementations return 404 with valid content
+                try:
+                    result = response.json()
+                    if isinstance(result, dict) and "error" not in result:
+                        logger.warning(f"Endpoint {url} returned 404 but contained valid data. Using the data anyway.")
+                        return {"status": "success", "result": result}
+                    else:
+                        logger.warning(f"Endpoint not found: {url}")
+                        return {"status": "error", "error_type": "endpoint_not_found", "message": f"Endpoint not found: {url}"}
+                except ValueError:
+                    logger.warning(f"Endpoint not found: {url}")
+                    return {"status": "error", "error_type": "endpoint_not_found", "message": f"Endpoint not found: {url}"}
+            
             else:
                 raise ValueError(f"Unsupported HTTP method: {method}")
 
-            response.raise_for_status() # Raise HTTPStatusError for 4xx/5xx responses
+            # Check for 404 specifically to handle missing endpoints gracefully
+            if response.status_code == 404:
+                logger.warning(f"Endpoint {endpoint} not found in GhidraMCP server. This may be because the server doesn't implement this functionality yet.")
+                return {
+                    "status": "error", 
+                    "message": f"Endpoint '{endpoint}' not available in the GhidraMCP server. The server may need to be updated."
+                }
+                
+            response.raise_for_status() # Raise HTTPStatusError for other 4xx/5xx responses
 
             # Process successful response
             try:
@@ -87,6 +238,81 @@ def _make_ghidra_request(method: str, endpoint: str, params: Optional[Dict[str, 
 
 # --- Ghidra Functions (Not Tools directly, will be wrapped) ---
 
+# --- Project and Binary Management Functions ---
+
+def ghidra_list_projects() -> Dict[str, Any]:
+    """
+    Lists all available Ghidra projects.
+    
+    Returns:
+        A dictionary: {'status': 'success', 'result': ['project1', 'project2', ...]}
+        or {'status': 'error', 'message': '...'}.
+    """
+    return _make_ghidra_request('GET', 'list_projects')
+
+def ghidra_open_project(project_path: str) -> Dict[str, Any]:
+    """
+    Opens a Ghidra project at the specified path.
+    
+    Args:
+        project_path: The path to the Ghidra project (.gpr file or directory)
+        
+    Returns:
+        A dictionary: {'status': 'success', 'result': 'Project opened successfully'}
+        or {'status': 'error', 'message': '...'}.
+    """
+    return _make_ghidra_request('POST', 'open_project', data=project_path)
+
+def ghidra_import_file(file_path: str, analyze: bool = True) -> Dict[str, Any]:
+    """
+    Imports a binary file directly into Ghidra for analysis.
+    
+    Args:
+        file_path: The path to the binary file to import
+        analyze: Whether to automatically run analysis on the imported file (default: True)
+        
+    Returns:
+        A dictionary: {'status': 'success', 'result': 'File imported successfully'}
+        or {'status': 'error', 'message': '...'}.
+    """
+    payload = {"file_path": file_path, "analyze": analyze}
+    return _make_ghidra_request('POST', 'import_file', data=payload)
+
+def ghidra_list_programs() -> Dict[str, Any]:
+    """
+    Lists all programs (binaries) in the currently open Ghidra project.
+    
+    Returns:
+        A dictionary: {'status': 'success', 'result': ['program1', 'program2', ...]}
+        or {'status': 'error', 'message': '...'}.
+    """
+    return _make_ghidra_request('GET', 'list_programs')
+
+def ghidra_open_program(program_name: str) -> Dict[str, Any]:
+    """
+    Opens a specific program (binary) in the currently open Ghidra project.
+    
+    Args:
+        program_name: The name of the program to open
+        
+    Returns:
+        A dictionary: {'status': 'success', 'result': 'Program opened successfully'}
+        or {'status': 'error', 'message': '...'}.
+    """
+    return _make_ghidra_request('POST', 'open_program', data=program_name)
+
+def ghidra_get_current_program() -> Dict[str, Any]:
+    """
+    Gets information about the currently open program (binary) in Ghidra.
+    
+    Returns:
+        A dictionary: {'status': 'success', 'result': {'name': 'program1', 'path': '/path/to/program1'}}
+        or {'status': 'error', 'message': '...'}.
+    """
+    return _make_ghidra_request('GET', 'get_current_program')
+
+# --- Existing Analysis Functions ---
+
 def ghidra_list_functions() -> Dict[str, Any]:
     """
     Lists all functions currently loaded in the Ghidra project.
@@ -94,7 +320,7 @@ def ghidra_list_functions() -> Dict[str, Any]:
     Returns a dictionary: {'status': 'success', 'result': ['func1 (0x...)', 'func2 (0x...)']}
     or {'status': 'error', 'message': '...'}.
     """
-    return _make_ghidra_request('GET', 'list_functions')
+    return _make_ghidra_request('list_functions')
 
 def ghidra_decompile_function_by_name(function_name: str) -> Dict[str, Any]:
     """
