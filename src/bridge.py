@@ -18,21 +18,22 @@ from src.config import BridgeConfig
 from src.ollama_client import OllamaClient
 from src.ghidra_client import GhidraMCPClient
 from src.command_parser import CommandParser
+from src.cag.manager import CAGManager
 
 # Configure logging
 def setup_logging(config):
     """Set up logging configuration."""
     handlers = []
     
-    if config.logging.console_logging:
+    if config.log_console:
         handlers.append(logging.StreamHandler(sys.stdout))
         
-    if config.logging.file_logging:
-        handlers.append(logging.FileHandler(config.logging.log_file))
+    if config.log_file_enabled:
+        handlers.append(logging.FileHandler(config.log_file))
         
     logging.basicConfig(
-        level=getattr(logging, config.logging.level),
-        format=config.logging.format,
+        level=getattr(logging, config.log_level),
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=handlers
     )
     
@@ -41,7 +42,8 @@ def setup_logging(config):
 class Bridge:
     """Main bridge class that connects Ollama with GhidraMCP."""
     
-    def __init__(self, config: BridgeConfig, include_capabilities: bool = False, max_agent_steps: int = 5):
+    def __init__(self, config: BridgeConfig, include_capabilities: bool = False, max_agent_steps: int = 5,
+                enable_cag: bool = True):
         """
         Initialize the bridge.
         
@@ -49,6 +51,7 @@ class Bridge:
             config: BridgeConfig object with configuration settings
             include_capabilities: Flag to include capabilities in prompt
             max_agent_steps: Maximum number of steps for tool execution
+            enable_cag: Flag to enable Cache-Augmented Generation
         """
         self.config = config
         self.logger = setup_logging(config)
@@ -59,6 +62,12 @@ class Bridge:
         self.capabilities_text = self._load_capabilities_text()
         self.logger.info(f"Bridge initialized with Ollama at {config.ollama.base_url} and GhidraMCP at {config.ghidra.base_url}")
         self.max_agent_steps = max_agent_steps  # Maximum number of steps for tool execution
+        
+        # Initialize CAG Manager
+        self.enable_cag = enable_cag
+        self.cag_manager = CAGManager() if enable_cag else None
+        if self.enable_cag:
+            self.logger.info("Cache-Augmented Generation (CAG) enabled")
         
         # Internal state management - track what the agent has already done
         self.analysis_state = {
@@ -165,6 +174,20 @@ class Bridge:
         
         history_section = "## Conversation History:\n" + "\n".join(history_items) + "\n---\n\n"
         
+        # CAG section - enhanced context from knowledge and session caches
+        cag_section = ""
+        if self.enable_cag and self.cag_manager and self.context and self.context[-1]["role"] == "user":
+            # Update session cache with latest context
+            self.cag_manager.update_session_from_bridge_context(self.context)
+            
+            # Get the latest user query
+            user_query = self.context[-1]["content"]
+            
+            # Get enhanced context from CAG
+            cag_context = self.cag_manager.enhance_prompt(user_query, phase)
+            if cag_context:
+                cag_section = f"## Enhanced Context:\n{cag_context}\n---\n\n"
+        
         # Instructions section based on the current phase
         instructions_section = ""
         
@@ -215,7 +238,7 @@ class Bridge:
             )
         
         # Create the full prompt
-        full_prompt = capabilities_section + state_section + plan_section + history_section + instructions_section
+        full_prompt = capabilities_section + state_section + plan_section + cag_section + history_section + instructions_section
         
         # Add final context for user queries
         if self.context and self.context[-1]["role"] == "user":
@@ -300,63 +323,89 @@ class Bridge:
             
         return True
 
-    def _execute_single_command(self, command_name: str, params: Dict[str, Any]) -> str:
+    def _normalize_command_name(self, command_name: str) -> str:
         """
-        Execute a single GhidraMCP command with enhanced error handling and automatic recovery.
+        Normalize command names from camelCase to snake_case if needed.
         
         Args:
-            command_name: Name of the GhidraMCP command
-            params: Command parameters
+            command_name: The command name to normalize
             
         Returns:
-            Result or error string with suggestions
+            Normalized command name
+        """
+        # First check if the command name already exists
+        if hasattr(self.ghidra, command_name):
+            return command_name
+            
+        # Convert from camelCase to snake_case
+        s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', command_name)
+        snake_case = re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
+        
+        # Only return the snake_case version if it exists
+        if hasattr(self.ghidra, snake_case):
+            self.logger.info(f"Normalized command name from '{command_name}' to '{snake_case}'")
+            return snake_case
+        
+        # If neither exists, return the original (will be handled as an error later)
+        return command_name
+
+    def _execute_single_command(self, command_name: str, params: Dict[str, Any]) -> str:
+        """
+        Execute a single command using the GhidraMCP client.
+        
+        Args:
+            command_name: Name of the command to execute
+            params: Parameters for the command
+            
+        Returns:
+            Result of the command execution
         """
         try:
-            # Check if the command is available in the GhidraMCP client
+            # Normalize command name (convert camelCase to snake_case if needed)
+            command_name = self._normalize_command_name(command_name)
+            
+            self.logger.info(f"Executing GhidraMCP command: {command_name} with params: {params}")
+            
+            # Get the method on the GhidraMCP client
             if hasattr(self.ghidra, command_name):
-                self.logger.info(f"Executing GhidraMCP command: {command_name} with params: {params}")
+                method = getattr(self.ghidra, command_name)
+                result = method(**params)
                 
-                # Call the method on the GhidraMCP client
-                cmd_method = getattr(self.ghidra, command_name)
-                cmd_result = cmd_method(**params)
+                # Update CAG session if enabled
+                if self.enable_cag and self.cag_manager:
+                    if command_name == "decompile_function":
+                        # Extract address from the result (simple heuristic)
+                        # This assumes the function address appears in the decompiled code
+                        address = params.get("name", "unknown")
+                        self.cag_manager.update_from_function_decompile(address, params["name"], result)
+                    elif command_name == "decompile_function_by_address":
+                        address = params.get("address", "unknown")
+                        name = f"FUN_{address}" # Simplistic way to get a name
+                        self.cag_manager.update_from_function_decompile(address, name, result)
+                    elif command_name == "rename_function":
+                        self.cag_manager.update_from_function_rename(params["old_name"], params["new_name"])
+                    elif command_name == "rename_function_by_address":
+                        self.cag_manager.update_from_function_rename(params["function_address"], params["new_name"])
                 
-                # Check if there was an error
-                if isinstance(cmd_result, dict) and "error" in cmd_result:
-                    error_msg = self._handle_command_error(command_name, params, cmd_result.get("error", "Unknown error"))
-                    return error_msg
-                elif isinstance(cmd_result, str) and ("Failed" in cmd_result or "Error" in cmd_result):
-                    error_msg = self._handle_command_error(command_name, params, cmd_result)
-                    return error_msg
-                else:
-                    # Success! Update the analysis state
-                    self._update_analysis_state(command_name, params, str(cmd_result))
-                    
-                    # Format the command result
-                    if isinstance(cmd_result, (list, dict)):
-                        formatted_result = f"RESULT: {json.dumps(cmd_result, indent=2)}"
-                    else:
-                        formatted_result = f"RESULT: {cmd_result}"
-                    return formatted_result
+                # Update analysis state
+                self._update_analysis_state(command_name, params, result)
+                
+                return result
             else:
-                # Handle the case of an unknown command by providing alternative suggestions
-                error_msg = f"ERROR: Unknown command '{command_name}'"
+                error_msg = f"ERROR: Unknown command: {command_name}"
                 self.logger.error(error_msg)
                 
-                # Suggest alternative commands based on similarity
+                # Try to find similar commands
                 similar_commands = self._find_similar_commands(command_name)
                 if similar_commands:
-                    error_msg += f"\nDid you mean: {', '.join(similar_commands)}?"
+                    error_msg += f"\nDid you mean one of these? {', '.join(similar_commands)}"
                     
-                # Check for common command patterns and suggest alternatives
-                if command_name.startswith("search_"):
-                    search_type = command_name[7:]  # Remove "search_" prefix
-                    error_msg += f"\nTo search for {search_type}, try using search_functions_by_name with a relevant query."
-                
                 return error_msg
         except Exception as e:
-            error_msg = self._handle_command_error(command_name, params, str(e))
-            return error_msg
-            
+            error_msg = f"ERROR: {str(e)}"
+            self.logger.error(f"Error executing command {command_name}: {str(e)}")
+            return self._handle_command_error(command_name, params, error_msg)
+
     def _find_similar_commands(self, unknown_command: str) -> List[str]:
         """
         Find similar commands to suggest when an unknown command is used.
@@ -455,6 +504,11 @@ class Bridge:
                 phase="analysis"
             )
             self.logger.info(f"Received analysis response: {analysis_response[:100]}...")
+            
+            # Update CAG with analysis result if enabled
+            if self.enable_cag and self.cag_manager:
+                self.cag_manager.update_from_analysis_result(query, planning_prompt, analysis_response)
+                self.cag_manager.save_session()
             
             # Extract the final response
             if "FINAL RESPONSE:" in analysis_response:
@@ -627,6 +681,10 @@ class Bridge:
         review_step = 0
         has_final_response = False
         
+        # Counter to prevent infinite implied action detection loops
+        implied_action_counter = 0
+        max_implied_action_checks = 3
+        
         while review_step < self.max_agent_steps and not has_final_response:
             # Check if current final_response already contains "FINAL RESPONSE"
             if "FINAL RESPONSE:" in final_response:
@@ -636,13 +694,18 @@ class Bridge:
                 if len(final_parts) > 1:
                     potential_final = final_parts[1].strip()
                 
-                # Check for implied actions without commands
-                implied_actions_prompt = self._check_implied_actions_without_commands(final_response)
-                if implied_actions_prompt:
-                    self.logger.info("Found implied actions without commands in final response")
-                    # Add a prompt for the next round asking for explicit commands
-                    self.context.append({"role": "review", "content": implied_actions_prompt})
-                    continue  # Skip to next review round
+                # Check for implied actions without commands - with safety counter
+                if implied_action_counter < max_implied_action_checks:
+                    implied_actions_prompt = self._check_implied_actions_without_commands(final_response)
+                    if implied_actions_prompt:
+                        self.logger.info(f"Found implied actions without commands in final response (check {implied_action_counter+1}/{max_implied_action_checks})")
+                        # Add a prompt for the next round asking for explicit commands
+                        self.context.append({"role": "review", "content": implied_actions_prompt})
+                        implied_action_counter += 1
+                        review_step += 1  # Increment review step to avoid infinite loop
+                        continue  # Skip to next review round
+                else:
+                    self.logger.warning(f"Reached maximum implied action checks ({max_implied_action_checks}), proceeding with review")
                 
                 # Check the quality of the final response
                 if self._check_final_response_quality(potential_final):
@@ -725,29 +788,18 @@ class Bridge:
                     if len(final_parts) > 1:
                         potential_final = final_parts[1].strip()
                     
-                    # Check for implied actions without commands
-                    implied_actions_prompt = self._check_implied_actions_without_commands(final_response)
-                    if implied_actions_prompt:
-                        self.logger.info("Found implied actions without commands in final response")
-                        # Add a prompt for the next round asking for explicit commands
-                        self.context.append({"role": "review", "content": implied_actions_prompt})
-                        continue  # Skip to next review round
-                    
-                    # Check the quality of the final response
-                    if self._check_final_response_quality(potential_final):
-                        has_final_response = True
-                        self.logger.info("Found high-quality 'FINAL RESPONSE' marker in review, ending review loop")
-                        final_response = potential_final
-                        break
+                    # Check for implied actions without commands - with safety counter
+                    if implied_action_counter < max_implied_action_checks:
+                        implied_actions_prompt = self._check_implied_actions_without_commands(final_response)
+                        if implied_actions_prompt:
+                            self.logger.info(f"Found implied actions without commands in final response (check {implied_action_counter+1}/{max_implied_action_checks})")
+                            # Add a prompt for the next round asking for explicit commands
+                            self.context.append({"role": "review", "content": implied_actions_prompt})
+                            implied_action_counter += 1
+                            review_step += 1  # Increment review step to avoid infinite loop
+                            continue  # Skip to next review round
                     else:
-                        # If tool errors were encountered and we're near the end of review rounds, accept the response anyway
-                        if tool_errors_encountered and review_step >= self.max_agent_steps - 2:
-                            has_final_response = True
-                            self.logger.info("Accepting final response despite limitations due to tool errors")
-                            final_response = potential_final
-                            break
-                        else:
-                            self.logger.info("Found 'FINAL RESPONSE' marker but response indicates limitations, continuing review")
+                        self.logger.warning(f"Reached maximum implied action checks ({max_implied_action_checks}), proceeding with review")
             
             review_step += 1
                 
@@ -1394,6 +1446,10 @@ class Bridge:
         """
         # Skip if there are already commands in the response
         if "EXECUTE:" in response_text:
+            return ""
+            
+        # Check if this is a review prompt we generated - if so, don't re-analyze it
+        if "Your response implies certain actions should be taken" in response_text:
             return ""
             
         # Patterns that indicate implied actions without explicit commands

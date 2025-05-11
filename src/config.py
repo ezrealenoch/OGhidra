@@ -233,56 +233,76 @@ class LoggingConfig:
 
 @dataclass
 class BridgeConfig:
-    """Main configuration for the Bridge application."""
+    """Configuration for the Bridge."""
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     ghidra: GhidraMCPConfig = field(default_factory=GhidraMCPConfig)
-    logging: LoggingConfig = field(default_factory=LoggingConfig)
+    log_level: str = "INFO"
+    log_file: str = "bridge.log"
+    log_console: bool = True
+    log_file_enabled: bool = True
     context_limit: int = 5  # Number of previous exchanges to include in context
+    max_steps: int = 5  # Maximum number of steps for tool execution
     
+    # CAG Configuration
+    cag_enabled: bool = True
+    cag_knowledge_cache_enabled: bool = True
+    cag_session_cache_enabled: bool = True
+    cag_token_limit: int = 2000
+
     @classmethod
-    def from_env(cls) -> 'BridgeConfig':
-        """Create a configuration from environment variables."""
-        # Create base Ollama config with core settings
+    def from_env(cls) -> "BridgeConfig":
+        """
+        Create a BridgeConfig object from environment variables.
+
+        Returns:
+            BridgeConfig object
+        """
+        # Load Ollama configuration
         ollama_config = OllamaConfig(
-            base_url=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
-            model=os.environ.get("OLLAMA_MODEL", "llama3.1"),
-            timeout=int(os.environ.get("OLLAMA_TIMEOUT", "120")),
+            base_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
+            model=os.getenv("OLLAMA_MODEL", "llama3.1"),
+            timeout=int(os.getenv("OLLAMA_TIMEOUT", "120")),
         )
         
-        # Set up model map from environment variables
-        model_map = {}
-        for phase in ["planning", "execution", "analysis"]:
-            env_var = f"OLLAMA_MODEL_{phase.upper()}"
-            if env_var in os.environ:
-                model_map[phase] = os.environ[env_var]
+        # Load phase-specific models if defined
+        ollama_config.planning_model = os.getenv("OLLAMA_MODEL_PLANNING", ollama_config.model)
+        ollama_config.execution_model = os.getenv("OLLAMA_MODEL_EXECUTION", ollama_config.model)
+        ollama_config.analysis_model = os.getenv("OLLAMA_MODEL_ANALYSIS", ollama_config.model)
         
-        # Only set if any values were defined
-        if model_map:
-            ollama_config.model_map = model_map
-            
-        # Set up system prompts for different phases from environment variables
-        phase_prompts = {}
-        for phase in ["planning", "execution", "analysis"]:
-            env_var = f"OLLAMA_SYSTEM_PROMPT_{phase.upper()}"
-            if env_var in os.environ:
-                phase_prompts[phase] = os.environ[env_var]
-                
-        # Only set if any values were defined
-        if phase_prompts:
-            ollama_config.phase_system_prompts = phase_prompts
+        # Load GhidraMCP configuration
+        ghidra_config = GhidraMCPConfig(
+            base_url=os.getenv("GHIDRA_MCP_URL", "http://localhost:8080"),
+            timeout=int(os.getenv("GHIDRA_MCP_TIMEOUT", "30")),
+            mock_mode=os.getenv("GHIDRA_MOCK_MODE", "false").lower() == "true",
+        )
+        
+        # Load logging configuration
+        log_level = os.getenv("LOG_LEVEL", "INFO")
+        log_file = os.getenv("LOG_FILE", "bridge.log")
+        log_console = os.getenv("LOG_CONSOLE", "true").lower() == "true"
+        log_file_enabled = os.getenv("LOG_FILE_ENABLED", "true").lower() == "true"
+        
+        # Load Bridge configuration
+        context_limit = int(os.getenv("CONTEXT_LIMIT", "5"))
+        max_steps = int(os.getenv("MAX_STEPS", "5"))
+        
+        # Load CAG configuration
+        cag_enabled = os.getenv("CAG_ENABLED", "true").lower() == "true"
+        cag_knowledge_cache_enabled = os.getenv("CAG_KNOWLEDGE_CACHE_ENABLED", "true").lower() == "true"
+        cag_session_cache_enabled = os.getenv("CAG_SESSION_CACHE_ENABLED", "true").lower() == "true"
+        cag_token_limit = int(os.getenv("CAG_TOKEN_LIMIT", "2000"))
         
         return cls(
             ollama=ollama_config,
-            ghidra=GhidraMCPConfig(
-                base_url=os.environ.get("GHIDRA_MCP_URL", "http://localhost:8080"),
-                timeout=int(os.environ.get("GHIDRA_MCP_TIMEOUT", "30")),
-                mock_mode=os.environ.get("GHIDRA_MOCK_MODE", "false").lower() == "true",
-            ),
-            logging=LoggingConfig(
-                level=os.environ.get("LOG_LEVEL", "INFO"),
-                log_file=os.environ.get("LOG_FILE", "bridge.log"),
-                console_logging=os.environ.get("LOG_CONSOLE", "true").lower() == "true",
-                file_logging=os.environ.get("LOG_FILE_ENABLED", "true").lower() == "true",
-            ),
-            context_limit=int(os.environ.get("CONTEXT_LIMIT", "5")),
+            ghidra=ghidra_config,
+            log_level=log_level,
+            log_file=log_file,
+            log_console=log_console,
+            log_file_enabled=log_file_enabled,
+            context_limit=context_limit,
+            max_steps=max_steps,
+            cag_enabled=cag_enabled,
+            cag_knowledge_cache_enabled=cag_knowledge_cache_enabled,
+            cag_session_cache_enabled=cag_session_cache_enabled,
+            cag_token_limit=cag_token_limit
         ) 
