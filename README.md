@@ -1,7 +1,7 @@
 # Ollama-GhidraMCP Bridge
 
 A Python application that bridges locally hosted AI models (via Ollama) with GhidraMCP for AI-assisted reverse engineering tasks within Ghidra.
-(Working on agentic loop. Currently using cogito:32b, its very brief and not wordy so its good at running tools)
+(Working with multiple models including llama3, codellama, and now Gemma. Default is currently gemma3:27b)
 ![Screenshot 2025-04-14 155639](https://github.com/user-attachments/assets/f8fb0fb1-6a9c-4097-8e3e-00d87d2d96f4)
 
 
@@ -9,7 +9,7 @@ A Python application that bridges locally hosted AI models (via Ollama) with Ghi
 
 This bridge connects the following components:
 
-- **Ollama Server**: Hosts local AI models (e.g., LLaMA 3, Mistral) accessible via REST API
+- **Ollama Server**: Hosts local AI models (e.g., LLaMA 3, Mistral, Gemma) accessible via REST API
 - **Bridge Application**: This Python application that serves as an intermediary
 - **GhidraMCP Server**: Exposes Ghidra's functionalities via MCP
 
@@ -21,6 +21,9 @@ This bridge connects the following components:
 - **Health Checks**: Verify connectivity to Ollama and GhidraMCP services
 - **Model Switching**: Use different models for different phases of the agentic loop
 - **Agentic Capabilities**: Multi-step reasoning with planning, execution, and analysis phases
+- **Terminal Output**: View tool calls and results directly in the terminal
+- **Command Normalization**: Automatically convert camelCase to snake_case for non-tool-calling models
+- **Enhanced Error Messages**: Clear feedback for incorrect command formats
 
 ## Requirements
 
@@ -75,6 +78,12 @@ You can now use different models for different phases of the agentic reasoning l
 python main.py --interactive --model llama3 --planning-model llama3 --execution-model codellama:7b
 ```
 
+The bridge now also supports **Gemma models**:
+
+```bash
+python main.py --interactive --model gemma3:27b
+```
+
 Available phase-specific models:
 - `--planning-model`: Model for the planning phase (creating analysis plans)
 - `--execution-model`: Model for the execution phase (running tools)
@@ -88,6 +97,15 @@ OLLAMA_MODEL_ANALYSIS=llama3:34b
 ```
 
 For more detailed information about model switching, see [README-MODEL-SWITCHING.md](README-MODEL-SWITCHING.md).
+
+### Non-Tool-Calling Models
+
+For models like Gemma that don't support the Ollama tool-calling API, the bridge includes:
+
+1. **Command normalization**: Automatically converts camelCase to snake_case (e.g., `getCurrentFunction` → `get_current_function`)
+2. **Parameter name standardization**: Handles common parameter errors (e.g., `function_address` → `address`)
+3. **Enhanced error messages**: Provides clear guidance when errors occur
+4. **Terminal output**: Shows command execution output directly in the terminal
 
 ### Mock Mode
 
@@ -114,7 +132,7 @@ You can configure the bridge through:
 1. Environment variables (see `.env.example`)
 2. Command line arguments:
    ```bash
-   python main.py --ollama-url http://localhost:11434 --ghidra-url http://localhost:8080 --model llama3 --interactive
+   python main.py --ollama-url http://localhost:11434 --ghidra-url http://localhost:8080 --model gemma3:27b --interactive
    ```
 
 ## Troubleshooting
@@ -130,6 +148,15 @@ If you encounter 404 errors or empty responses from the GhidraMCP server:
 3. **Try mock mode**: Use the `--mock` flag to verify the bridge functionality without connecting to a real server.
 
 4. **Check server URL**: Ensure the server URL in your configuration is correct, including the port.
+
+### Command Format Issues
+
+If your model is having trouble with command formats:
+
+1. Make sure your query explicitly states the command in the format: `EXECUTE: command_name(param="value")`
+2. For string parameters, always use quotes: `name="function_name"` 
+3. Use snake_case for command names: `get_current_function()` not `getCurrentFunction()`
+4. Check terminal output for error messages about incorrect command formats
 
 ### Ollama API Issues
 
@@ -151,16 +178,15 @@ If you see "Expecting value" or other JSON parsing errors:
 
 The bridge supports the following commands:
 
-- `decompile_function(address)`: Decompile a function at a given address
-- `rename_function(address, name)`: Rename a function to a specified name
+- `decompile_function(name="function_name")`: Decompile a function by name
+- `decompile_function_by_address(address="0x1000")`: Decompile a function at a given address
+- `rename_function(old_name="FUN_1000", new_name="initialize_data")`: Rename a function
+- `rename_function_by_address(address="0x1000", new_name="initialize_data")`: Rename a function by address
 - `list_functions()`: Retrieve a list of all functions in the binary
-- `get_imports()`: List all imported functions
-- `get_exports()`: List all exported functions
-- `get_memory_map()`: Retrieve the memory layout of the binary
-- `comment_function(address, comment)`: Add comments to a function
-- `rename_variable(function_address, variable_name, new_name)`: Rename a local variable
-- `search_strings(pattern)`: Search for strings in memory
-- `get_references(address)`: Get references from/to a specific address
+- `search_functions_by_name(query="init")`: Search for functions by substring
+- `list_imports()`: List all imported functions
+- `list_exports()`: List all exported functions
+- `list_segments()`: Retrieve the memory layout of the binary
 
 ## Example Queries
 
