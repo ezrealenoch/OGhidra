@@ -213,6 +213,22 @@ class GhidraMCPClient:
             logger.error(f"GhidraMCP server health check failed: {str(e)}")
             return False
     
+    def check_health(self) -> bool:
+        """
+        Check if the GhidraMCP server is reachable and responding.
+        
+        Returns:
+            True if GhidraMCP is healthy, False otherwise
+        """
+        try:
+            # Try a simple endpoint like listing first method as a health check
+            response = self.client.get(f"{self.config.base_url}/methods", params={"offset": 0, "limit": 1})
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"GhidraMCP health check failed: {str(e)}")
+            return False
+    
     # Implement GhidraMCP API methods
     
     def list_methods(self, offset: int = 0, limit: int = 100) -> List[str]:

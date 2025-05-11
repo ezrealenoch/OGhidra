@@ -241,24 +241,35 @@ class OllamaClient:
     
     def list_models(self) -> List[str]:
         """
-        List available models on the Ollama server.
+        List all available models from the Ollama API.
         
         Returns:
-            List of model names
-            
-        Raises:
-            Exception: If the request fails
+            List of model names or empty list if request fails
         """
         try:
-            response = self.client.get(f"{self.config.base_url}/api/tags")
+            url = f"{self.config.base_url}/api/tags"
+            response = self.client.get(url)
             response.raise_for_status()
-            result = response.json()
-            models = [model.get("name") for model in result.get("models", [])]
-            logger.info(f"Retrieved {len(models)} available models from Ollama")
-            return models
+            data = response.json()
+            return [model["name"] for model in data.get("models", [])]
         except Exception as e:
-            logger.error(f"Error listing Ollama models: {str(e)}")
-            raise
+            logger.error(f"Failed to list models: {str(e)}")
+            return []
+    
+    def check_health(self) -> bool:
+        """
+        Check if the Ollama server is accessible and responding.
+        
+        Returns:
+            True if the server is healthy, False otherwise
+        """
+        try:
+            # Try to list models as a simple health check
+            models = self.list_models()
+            return len(models) > 0
+        except Exception as e:
+            logger.error(f"Ollama health check failed: {str(e)}")
+            return False
 
     def health_check(self) -> bool:
         """
