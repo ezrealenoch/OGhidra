@@ -4,123 +4,179 @@
       "name": "decompile_function",
       "description": "Decompiles a function by name using Ghidra's decompiler. Returns the C-like representation of the function's code.",
       "parameters": {
-        "name": "The name of the function to decompile (e.g., \"FUN_14001000\", \"main\") - must be quoted"
+        "name": "The name of the function to decompile (e.g., 'FUN_14001000', 'main')"
       },
       "return_type": "string",
-      "common_locations": ["Binary analysis"],
-      "related_functions": ["decompile_function_by_address", "get_current_function"],
-      "example": "EXECUTE: decompile_function(name=\"FUN_14001000\")"
+      "common_locations": [
+        "Binary analysis"
+      ],
+      "related_functions": [
+        "decompile_function_by_address",
+        "get_current_function"
+      ],
+      "token_count": 101
     },
     "decompile_function_by_address": {
       "name": "decompile_function_by_address",
       "description": "Decompiles a function at the specified address using Ghidra's decompiler. Returns the C-like representation of the function's code.",
       "parameters": {
-        "address": "The address of the function to decompile (e.g., \"14001000\") - must be quoted"
+        "address": "The address of the function to decompile (e.g., '14001000')"
       },
       "return_type": "string",
-      "common_locations": ["Binary analysis"],
-      "related_functions": ["decompile_function", "get_function_by_address"],
-      "example": "EXECUTE: decompile_function_by_address(address=\"14001000\")"
+      "common_locations": [
+        "Binary analysis"
+      ],
+      "related_functions": [
+        "decompile_function",
+        "get_function_by_address"
+      ],
+      "token_count": 104
     },
     "rename_function": {
       "name": "rename_function",
       "description": "Renames a function from its current name to a new name. This helps with code readability and understanding program semantics.",
       "parameters": {
-        "old_name": "Current function name (e.g., \"FUN_14001000\") - must be quoted",
-        "new_name": "New function name (e.g., \"initialize_data\") - must be quoted"
+        "old_name": "Current function name",
+        "new_name": "New function name"
       },
       "return_type": "string",
-      "common_locations": ["Symbol management", "Code organization"],
-      "related_functions": ["rename_function_by_address"],
-      "example": "EXECUTE: rename_function(old_name=\"FUN_14001000\", new_name=\"initialize_data\")"
+      "common_locations": [
+        "Symbol management",
+        "Code organization"
+      ],
+      "related_functions": [
+        "rename_function_by_address"
+      ],
+      "token_count": 99
     },
     "rename_function_by_address": {
       "name": "rename_function_by_address",
       "description": "Renames a function at the specified address to a new name. IMPORTANT: Use numerical addresses only, not function names.",
       "parameters": {
-        "address": "The address of the function to rename (e.g., \"14001000\") - must be quoted",
-        "new_name": "New function name (e.g., \"initialize_data\") - must be quoted"
+        "function_address": "The address of the function to rename (numerical only, e.g., '14001000')",
+        "new_name": "New function name"
       },
       "return_type": "string",
-      "common_locations": ["Symbol management", "Code organization"],
-      "related_functions": ["rename_function", "get_function_by_address"],
-      "example": "EXECUTE: rename_function_by_address(address=\"14001000\", new_name=\"initialize_data\")"
+      "common_locations": [
+        "Symbol management",
+        "Code organization"
+      ],
+      "related_functions": [
+        "rename_function",
+        "get_function_by_address"
+      ],
+      "token_count": 119
     },
     "list_functions": {
       "name": "list_functions",
       "description": "Lists all functions in the currently loaded program. This provides a comprehensive view of all defined functions.",
       "parameters": {},
-      "return_type": "array of function information",
-      "common_locations": ["Program exploration", "Initial analysis"],
-      "related_functions": ["list_imports", "list_exports"],
-      "example": "EXECUTE: list_functions()"
+      "return_type": "string[]",
+      "common_locations": [
+        "Program exploration",
+        "Initial analysis"
+      ],
+      "related_functions": [
+        "list_imports",
+        "list_exports"
+      ],
+      "token_count": 80
     },
     "list_imports": {
       "name": "list_imports",
       "description": "Lists imported symbols in the program with pagination. Useful for understanding external dependencies.",
       "parameters": {
-        "offset": "Offset to start from (integer, optional)",
-        "limit": "Maximum number of results (integer, optional)"
+        "offset": "Offset to start from",
+        "limit": "Maximum number of results"
       },
-      "return_type": "array of import information",
-      "common_locations": ["External interface analysis", "Dependency mapping"],
-      "related_functions": ["list_exports", "list_functions"],
-      "example": "EXECUTE: list_imports(offset=0, limit=20)"
+      "return_type": "string[]",
+      "common_locations": [
+        "External interface analysis",
+        "Dependency mapping"
+      ],
+      "related_functions": [
+        "list_exports",
+        "list_functions"
+      ],
+      "token_count": 98
     },
     "list_exports": {
       "name": "list_exports",
       "description": "Lists exported functions/symbols in the program with pagination. Useful for understanding the program's public interface.",
       "parameters": {
-        "offset": "Offset to start from (integer, optional)",
-        "limit": "Maximum number of results (integer, optional)"
+        "offset": "Offset to start from",
+        "limit": "Maximum number of results"
       },
-      "return_type": "array of export information",
-      "common_locations": ["External interface analysis", "API mapping"],
-      "related_functions": ["list_imports", "list_functions"],
-      "example": "EXECUTE: list_exports(offset=0, limit=20)"
+      "return_type": "string[]",
+      "common_locations": [
+        "External interface analysis",
+        "API mapping"
+      ],
+      "related_functions": [
+        "list_imports",
+        "list_functions"
+      ],
+      "token_count": 101
     },
     "list_segments": {
       "name": "list_segments",
       "description": "Lists all memory segments in the program with pagination. This provides information about memory layout and permissions.",
       "parameters": {
-        "offset": "Offset to start from (integer, optional)",
-        "limit": "Maximum number of results (integer, optional)"
+        "offset": "Offset to start from",
+        "limit": "Maximum number of results"
       },
-      "return_type": "array of segment information",
-      "common_locations": ["Memory analysis", "Program structure analysis"],
+      "return_type": "string[]",
+      "common_locations": [
+        "Memory analysis",
+        "Program structure analysis"
+      ],
       "related_functions": [],
-      "example": "EXECUTE: list_segments(offset=0, limit=20)"
+      "token_count": 93
     },
     "search_functions_by_name": {
       "name": "search_functions_by_name",
       "description": "Searches for functions by name substring. Useful for finding specific functions without knowing the exact name.",
       "parameters": {
-        "query": "Search query string (e.g., \"init\") - must be quoted",
-        "offset": "Offset to start from (integer, optional)",
-        "limit": "Maximum number of results (integer, optional)"
+        "query": "Search query string",
+        "offset": "Offset to start from",
+        "limit": "Maximum number of results"
       },
-      "return_type": "array of matching function information",
-      "common_locations": ["Function discovery", "Code exploration"],
-      "related_functions": ["list_functions"],
-      "example": "EXECUTE: search_functions_by_name(query=\"init\", offset=0, limit=20)"
+      "return_type": "string[]",
+      "common_locations": [
+        "Function discovery",
+        "Code exploration"
+      ],
+      "related_functions": [
+        "list_functions"
+      ],
+      "token_count": 104
     },
     "get_current_function": {
       "name": "get_current_function",
       "description": "Gets the function at the current cursor position or selection in Ghidra. Returns the function address and name.",
       "parameters": {},
-      "return_type": "function information",
-      "common_locations": ["Interactive analysis"],
-      "related_functions": ["get_current_address", "decompile_function"],
-      "example": "EXECUTE: get_current_function()"
+      "return_type": "string",
+      "common_locations": [
+        "Interactive analysis"
+      ],
+      "related_functions": [
+        "get_current_address",
+        "decompile_function"
+      ],
+      "token_count": 79
     },
     "get_current_address": {
       "name": "get_current_address",
       "description": "Gets the address at the current cursor position in Ghidra.",
       "parameters": {},
       "return_type": "string",
-      "common_locations": ["Interactive analysis"],
-      "related_functions": ["get_current_function"],
-      "example": "EXECUTE: get_current_address()"
+      "common_locations": [
+        "Interactive analysis"
+      ],
+      "related_functions": [
+        "get_current_function"
+      ],
+      "token_count": 61
     }
   }
-} 
+}

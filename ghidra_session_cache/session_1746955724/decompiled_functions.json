@@ -1,0 +1,9 @@
+{
+  "140251140": {
+    "address": "140251140",
+    "name": "FUN_140251140",
+    "decompiled_code": "\nvoid FUN_140251140(void)\n\n{\n  code *pcVar1;\n  DWORD DVar2;\n  int iVar3;\n  undefined *puVar4;\n  longlong lVar5;\n  longlong *plVar6;\n  \n  puVar4 = &DAT_140370910;\n  DVar2 = GetCurrentThreadId();\n  iVar3 = FUN_140250604(&DAT_1403629e0);\n  if (iVar3 != 0) {\n    FUN_1402505bc(5);\n    pcVar1 = (code *)swi(3);\n    (*pcVar1)();\n    return;\n  }\n  if (DAT_140362a2c == 0x7fffffff) {\n    DAT_140362a2c = 0x7ffffffe;\n    FUN_1402505bc(6);\n    pcVar1 = (code *)swi(3);\n    (*pcVar1)();\n    return;\n  }\n  do {\n    lVar5 = 0;\n    iVar3 = *(int *)(puVar4 + 800);\n    if (iVar3 != 0) {\n      plVar6 = (longlong *)(puVar4 + 0x10);\n      do {\n        if (0x13 < lVar5) break;\n        if ((*plVar6 != 0) && (*(DWORD *)(plVar6 + -1) == DVar2)) {\n          if ((undefined4 *)plVar6[2] != (undefined4 *)0x0) {\n            *(undefined4 *)plVar6[2] = 1;\n          }\n          FUN_14025060c(*plVar6);\n          FUN_140250760(plVar6[1]);\n          *plVar6 = 0;\n          *(int *)(puVar4 + 800) = *(int *)(puVar4 + 800) + -1;\n          iVar3 = *(int *)(puVar4 + 800);\n        }\n        lVar5 = lVar5 + 1;\n        plVar6 = plVar6 + 5;\n      } while (iVar3 != 0);\n    }\n    puVar4 = *(undefined **)(puVar4 + 0x328);\n    if (puVar4 == (undefined *)0x0) {\n      FUN_14025060c(&DAT_1403629e0);\n      return;\n    }\n  } while( true );\n}\n",
+    "timestamp": 1746956090.454633,
+    "token_count": 326
+  }
+}
