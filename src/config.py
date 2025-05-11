@@ -198,6 +198,12 @@ class OllamaConfig:
     You are a tool execution assistant specialized in reverse engineering with Ghidra.
     Your task is to execute the necessary Ghidra commands to fulfill the user's request.
     Use the EXECUTE: command_name(param1=value1, param2=value2) format to call commands.
+    
+    IMPORTANT: All command names MUST use snake_case format with underscores, not camelCase.
+    For example, use 'get_current_function()' NOT 'getCurrentFunction()'.
+    Use 'decompile_function()' NOT 'decompileFunction()'.
+    Use 'rename_function_by_address()' NOT 'renameFunctionByAddress()'.
+    
     Focus on retrieving the information needed, not on analysis yet.
     """
     

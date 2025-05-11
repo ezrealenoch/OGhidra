@@ -371,6 +371,10 @@ class Bridge:
                 method = getattr(self.ghidra, command_name)
                 result = method(**params)
                 
+                # Print the command and result to the terminal for visibility
+                print(f"\n[EXECUTING] {command_name}({', '.join([f'{k}={v!r}' for k, v in params.items()])})")
+                print(f"[RESULT] {result!r}\n")
+                
                 # Update CAG session if enabled
                 if self.enable_cag and self.cag_manager:
                     if command_name == "decompile_function":
@@ -385,7 +389,7 @@ class Bridge:
                     elif command_name == "rename_function":
                         self.cag_manager.update_from_function_rename(params["old_name"], params["new_name"])
                     elif command_name == "rename_function_by_address":
-                        self.cag_manager.update_from_function_rename(params["function_address"], params["new_name"])
+                        self.cag_manager.update_from_function_rename(params["address"], params["new_name"])
                 
                 # Update analysis state
                 self._update_analysis_state(command_name, params, result)
@@ -395,15 +399,24 @@ class Bridge:
                 error_msg = f"ERROR: Unknown command: {command_name}"
                 self.logger.error(error_msg)
                 
+                # Print error message to terminal
+                print(f"\n[ERROR] Unknown command: {command_name}")
+                
                 # Try to find similar commands
                 similar_commands = self._find_similar_commands(command_name)
                 if similar_commands:
-                    error_msg += f"\nDid you mean one of these? {', '.join(similar_commands)}"
+                    suggestion = f"Did you mean one of these? {', '.join(similar_commands)}"
+                    print(f"[SUGGESTION] {suggestion}")
+                    error_msg += f"\n{suggestion}"
                     
                 return error_msg
         except Exception as e:
             error_msg = f"ERROR: {str(e)}"
             self.logger.error(f"Error executing command {command_name}: {str(e)}")
+            
+            # Print error to terminal
+            print(f"\n[ERROR] Failed to execute {command_name}: {str(e)}")
+            
             return self._handle_command_error(command_name, params, error_msg)
 
     def _find_similar_commands(self, unknown_command: str) -> List[str]:
@@ -1069,8 +1082,8 @@ class Bridge:
         elif command_name == "rename_function" and "old_name" in params and "new_name" in params:
             self.analysis_state["functions_renamed"][params["old_name"]] = params["new_name"]
             
-        elif command_name == "rename_function_by_address" and "function_address" in params and "new_name" in params:
-            self.analysis_state["functions_renamed"][params["function_address"]] = params["new_name"]
+        elif command_name == "rename_function_by_address" and "address" in params and "new_name" in params:
+            self.analysis_state["functions_renamed"][params["address"]] = params["new_name"]
             
         # Track comments added
         elif command_name in ["set_decompiler_comment", "set_disassembly_comment"] and "address" in params and "comment" in params:

@@ -17,6 +17,13 @@ class CommandParser:
     # Command format: EXECUTE: command_name(param1=value1, param2=value2)
     COMMAND_PATTERN = r'EXECUTE:\s*([\w_]+)\((.*?)\)'
     
+    # This pattern will attempt to capture tool_execution and other incorrect formats
+    ALTERNATE_FORMATS = [
+        (r'```tool_execution\s*([\w_]+)\((.*?)\)\s*```', 'tool_execution with code blocks'),
+        (r'tool_execution\s*([\w_]+)\((.*?)\)', 'tool_execution without code blocks'),
+        (r'```json\s*\{\s*"tool"\s*:\s*"([\w_]+)"\s*,\s*"parameters"\s*:\s*\{(.*?)\}\s*\}\s*```', 'JSON tool format')
+    ]
+    
     @staticmethod
     def extract_commands(response: str) -> List[Tuple[str, Dict[str, str]]]:
         """
@@ -30,7 +37,7 @@ class CommandParser:
         """
         commands = []
         
-        # Find all command occurrences in the response
+        # Find all command occurrences in the response using the correct format
         matches = re.finditer(CommandParser.COMMAND_PATTERN, response, re.MULTILINE)
         
         for match in matches:
@@ -45,6 +52,35 @@ class CommandParser:
             
             commands.append((command_name, params))
             logger.debug(f"Extracted command: {command_name} with params: {params}")
+        
+        # If no commands found with correct format, check for alternate formats
+        if not commands:
+            for pattern, format_name in CommandParser.ALTERNATE_FORMATS:
+                alt_matches = re.finditer(pattern, response, re.MULTILINE | re.DOTALL)
+                
+                for match in alt_matches:
+                    command_name = match.group(1)
+                    params_text = match.group(2).strip()
+                    
+                    # For JSON format, we need special handling
+                    if 'JSON' in format_name:
+                        # This is a simple approach, would need better parsing for production
+                        params = {}
+                        param_matches = re.finditer(r'"([\w_]+)"\s*:\s*"?([^",}]+)"?', params_text)
+                        for p_match in param_matches:
+                            params[p_match.group(1)] = p_match.group(2).strip()
+                    else:
+                        params = CommandParser._parse_parameters(params_text)
+                    
+                    # Log the incorrect format
+                    logger.warning(f"Found command using incorrect format ({format_name}): {command_name}")
+                    logger.warning(f"Commands should use format: EXECUTE: command_name(param1=\"value1\")")
+                    
+                    # Try to validate and transform the parameters
+                    params = CommandParser._validate_and_transform_params(command_name, params)
+                    
+                    commands.append((command_name, params))
+                    logger.debug(f"Extracted command (from {format_name}): {command_name} with params: {params}")
             
         return commands
     
@@ -64,14 +100,34 @@ class CommandParser:
         # Make a copy to avoid modifying the original
         validated_params = params.copy()
         
-        # For rename_function_by_address, check if function_address is a function name
-        if command_name == "rename_function_by_address" and "function_address" in validated_params:
-            addr = validated_params["function_address"]
+        # Handle parameter name mismatches (common in non-tool-calling models)
+        # Map of common incorrect parameter names to correct ones
+        param_corrections = {
+            "rename_function_by_address": {
+                "function_address": "address",
+                "functionAddress": "address"
+            },
+            "decompile_function_by_address": {
+                "function_address": "address",
+                "functionAddress": "address"
+            }
+        }
+        
+        # Apply parameter name corrections if needed
+        if command_name in param_corrections:
+            for wrong_name, correct_name in param_corrections[command_name].items():
+                if wrong_name in validated_params and correct_name not in validated_params:
+                    validated_params[correct_name] = validated_params.pop(wrong_name)
+                    logger.info(f"Corrected parameter name from '{wrong_name}' to '{correct_name}'")
+        
+        # For rename_function_by_address, check if address is a function name
+        if command_name == "rename_function_by_address" and "address" in validated_params:
+            addr = validated_params["address"]
             
             # If it starts with "FUN_" and the rest is hex, extract just the hex part
             if addr.startswith("FUN_") and all(c in "0123456789abcdefABCDEF" for c in addr[4:]):
                 # Extract just the address portion
-                validated_params["function_address"] = addr[4:]
+                validated_params["address"] = addr[4:]
                 logger.info(f"Transformed function address from '{addr}' to '{addr[4:]}'")
         
         # Handle 0x prefix in addresses for various functions
@@ -211,10 +267,10 @@ class CommandParser:
         
         # Add specific guidance based on the command and parameters
         if command_name == "rename_function_by_address":
-            addr = params.get("function_address", "")
+            addr = params.get("address", params.get("function_address", ""))
             if addr.startswith("FUN_"):
                 return (
-                    f"ERROR: Invalid parameter 'function_address'. Expected numerical address (e.g., '{addr[4:]}'), "
+                    f"ERROR: Invalid parameter 'address'. Expected numerical address (e.g., '{addr[4:]}'), "
                     f"but received function name ('{addr}'). "
                     f"Use the correct address or the 'rename_function' tool if you only have the name."
                 )
@@ -226,10 +282,33 @@ class CommandParser:
                     f"Try using get_function_by_address(address='{addr}') to verify the function exists."
                 )
         elif command_name.startswith("decompile_"):
+            if "not found" in error.lower() or "does not exist" in error.lower():
+                return (
+                    f"ERROR: {error}. "
+                    f"The function may not exist or may not be a valid target for decompilation. "
+                    f"Try list_functions() to see available functions."
+                )
+        
+        # Check for camelCase vs snake_case errors in the command name
+        if re.search(r'[a-z][A-Z]', command_name):
+            snake_case = re.sub(r'(?<!^)(?=[A-Z])', '_', command_name).lower()
             return (
-                f"ERROR: {error}. "
-                f"The function may not exist or may not be a valid target for decompilation. "
-                f"Try list_functions() to see available functions."
+                f"ERROR: Command '{command_name}' may be using camelCase format instead of snake_case. "
+                f"Try using '{snake_case}' instead. "
+                f"All command names must use snake_case with underscores."
             )
             
+        # Check for common parameter name errors
+        common_param_errors = {
+            "function_address": "address (in rename_function_by_address and decompile_function_by_address)"
+        }
+        
+        for param_name in params.keys():
+            if param_name in common_param_errors:
+                return (
+                    f"ERROR: Parameter '{param_name}' may be incorrect. "
+                    f"Try using '{common_param_errors[param_name]}' instead. "
+                    f"Check the parameter names in function_signatures.json for reference."
+                )
+                
         return enhanced_error 
