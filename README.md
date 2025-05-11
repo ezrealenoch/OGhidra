@@ -100,12 +100,48 @@ For more detailed information about model switching, see [README-MODEL-SWITCHING
 
 ### Non-Tool-Calling Models
 
-For models like Gemma that don't support the Ollama tool-calling API, the bridge includes:
+For models like Gemma that don't support the Ollama tool-calling API, the bridge includes automatic corrections for common issues:
 
-1. **Command normalization**: Automatically converts camelCase to snake_case (e.g., `getCurrentFunction` → `get_current_function`)
-2. **Parameter name standardization**: Handles common parameter errors (e.g., `function_address` → `address`)
-3. **Enhanced error messages**: Provides clear guidance when errors occur
-4. **Terminal output**: Shows command execution output directly in the terminal
+1. **Command normalization**: Automatically converts camelCase to snake_case
+   - Example: `getCurrentFunction()` → `get_current_function()`
+   - Example: `decompileFunction()` → `decompile_function()`
+
+2. **Parameter name standardization**: Fixes commonly misnamed parameters
+   - Example: `function_address` → `address` in decompile and rename functions
+   - Example: `functionAddress` → `address` (combines camelCase and parameter name fixes)
+
+3. **Format detection**: Recognizes various incorrect formats and converts them to the expected format
+   - Example: `tool_execution decompile_function_by_address(function_address=140251140)` is detected and processed
+
+4. **Address format standardization**: Handles various address formats
+   - Example: Removes `FUN_` prefix: `FUN_140001000` → `140001000`
+   - Example: Removes `0x` prefix: `0x140001000` → `140001000`
+
+5. **Enhanced error messages**: Provides clear guidance when errors occur
+6. **Terminal output**: Shows command execution output directly in the terminal
+
+For detailed information about command normalization, see [README-COMMAND-NORMALIZATION.md](README-COMMAND-NORMALIZATION.md).
+
+### Proper Command Format
+
+The correct format for commands is:
+```
+EXECUTE: command_name(param1="value1", param2="value2")
+```
+
+Common incorrect formats that are automatically detected:
+```
+tool_execution command_name(param1=value1)
+```
+```json
+{"tool": "command_name", "parameters": {"param1": "value1"}}
+```
+```
+EXECUTE: commandName(param1="value1")  # camelCase instead of snake_case
+```
+```
+EXECUTE: command_name(wrong_param_name="value1")  # Incorrect parameter name
+```
 
 ### Mock Mode
 
@@ -153,10 +189,15 @@ If you encounter 404 errors or empty responses from the GhidraMCP server:
 
 If your model is having trouble with command formats:
 
-1. Make sure your query explicitly states the command in the format: `EXECUTE: command_name(param="value")`
-2. For string parameters, always use quotes: `name="function_name"` 
-3. Use snake_case for command names: `get_current_function()` not `getCurrentFunction()`
-4. Check terminal output for error messages about incorrect command formats
+1. **Use the correct format**: `EXECUTE: command_name(param1="value1", param2="value2")`
+2. **Use quotes for strings**: Always use `param="value"` not `param=value` for string parameters
+3. **Use snake_case**: All commands use `snake_case_format` not `camelCaseFormat`
+4. **Check the terminal**: Command normalization logs are displayed in the terminal
+5. **Common mistakes**:
+   - Using `tool_execution` instead of `EXECUTE:`
+   - Using `function_address` instead of `address` parameter
+   - Missing quotes around string values
+   - Using camelCase for command names
 
 ### Ollama API Issues
 
