@@ -1,0 +1,34 @@
+# Ollama Configuration
+OLLAMA_URL=http://localhost:11434
+# Default model. llama3.1 is recommended for tool calling and general use.
+# You can change this to any other Ollama model you have installed (e.g., codellama:7b, mistral:latest).
+OLLAMA_MODEL=llama3.1
+OLLAMA_TIMEOUT=120
+
+# Phase-Specific Models
+# Set these to use different models for different phases of the analysis
+# Leave any phase empty to use the default OLLAMA_MODEL instead
+OLLAMA_MODEL_PLANNING=gemma3:27b    # Model for the planning phase
+OLLAMA_MODEL_EXECUTION=gemma3:27b    # Model for executing tools/commands
+OLLAMA_MODEL_ANALYSIS=qwen3:30b-a3b   # Model for analyzing results and creating the final response
+
+# GhidraMCP Configuration
+GHIDRA_MCP_URL=http://localhost:8080
+GHIDRA_MCP_TIMEOUT=30
+GHIDRA_MOCK_MODE=false
+GHIDRA_API_PATH=
+
+# Cache-Augmented Generation (CAG) Configuration
+CAG_ENABLED=true                    # Enable or disable CAG feature (true/false)
+CAG_KNOWLEDGE_CACHE_ENABLED=true    # Enable domain knowledge cache (true/false)
+CAG_SESSION_CACHE_ENABLED=true      # Enable session memory cache (true/false)
+CAG_TOKEN_LIMIT=2000                # Maximum tokens to allocate for CAG context
+
+# Logging Configuration
+LOG_LEVEL=INFO
+LOG_FILE=bridge.log
+LOG_CONSOLE=true
+LOG_FILE_ENABLED=true
+
+# Bridge Configuration
+CONTEXT_LIMIT=5                     # Number of previous exchanges to include in context 
