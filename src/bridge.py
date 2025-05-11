@@ -41,15 +41,14 @@ def setup_logging(config):
 class Bridge:
     """Main bridge class that connects Ollama with GhidraMCP."""
     
-    def __init__(self, config: BridgeConfig, include_capabilities: bool = False, max_agent_steps: int = 5, max_review_rounds: int = 3):
+    def __init__(self, config: BridgeConfig, include_capabilities: bool = False, max_agent_steps: int = 5):
         """
         Initialize the bridge.
         
         Args:
             config: BridgeConfig object with configuration settings
             include_capabilities: Flag to include capabilities in prompt
-            max_agent_steps: Maximum number of steps for agentic execution loop
-            max_review_rounds: Maximum number of review rounds after tool execution
+            max_agent_steps: Maximum number of steps for tool execution
         """
         self.config = config
         self.logger = setup_logging(config)
@@ -59,8 +58,7 @@ class Bridge:
         self.include_capabilities = include_capabilities
         self.capabilities_text = self._load_capabilities_text()
         self.logger.info(f"Bridge initialized with Ollama at {config.ollama.base_url} and GhidraMCP at {config.ghidra.base_url}")
-        self.max_agent_steps = max_agent_steps  # Maximum number of steps for agentic execution loop
-        self.max_review_rounds = max_review_rounds  # Maximum number of review rounds after tool execution
+        self.max_agent_steps = max_agent_steps  # Maximum number of steps for tool execution
         
         # Internal state management - track what the agent has already done
         self.analysis_state = {
@@ -82,10 +80,6 @@ class Bridge:
             'executed': [],  # List of executed tool calls [{'tool': name, 'params': {}}]
             'pending_critical': []  # List of critical planned tools that haven't been executed yet
         }
-        
-        # Context summarization settings
-        self.context_summarization_threshold = self.config.context_limit * 0.8
-        self.last_summarization_time = None
         
         if self.include_capabilities and self.capabilities_text:
             self.logger.info("Capabilities context will be included in prompts.")
@@ -164,7 +158,6 @@ class Bridge:
                     "Assistant: " if item["role"] == "assistant" else \
                     "Tool Call: " if item["role"] == "tool_call" else \
                     "Tool Result: " if item["role"] == "tool_result" else \
-                    "AI Review: " if item["role"] == "review" else \
                     "Plan: " if item["role"] == "plan" else \
                     "Summary: " if item["role"] == "summary" else \
                     f"{item['role'].capitalize()}: "
@@ -172,66 +165,68 @@ class Bridge:
         
         history_section = "## Conversation History:\n" + "\n".join(history_items) + "\n---\n\n"
         
-        # Instructions section - always included
-        instructions_section = (
-            "## Instructions:\n"
-            "1. Analyze the user request carefully based on available context\n"
-            "2. Use tools by writing `EXECUTE: tool_name(param1=value1, ...)` for each tool call\n"
-            "3. IMPORTANT FOR RENAME OPERATIONS: When using rename_function_by_address, "
-            "the function_address parameter must be the numerical address (e.g., '1800011a8'), not the function name (e.g., 'FUN_1800011a8')\n"
-            "4. CRITICAL: You MUST use an explicit EXECUTE command for any action you want to perform. "
-            "Simply stating that you 'will rename' or 'should add a comment' is NOT sufficient - you must "
-            "include the actual EXECUTE command to perform the action.\n"
-            "5. Provide analysis along with your tool calls\n"
-            "6. Your response should be clear and concise\n"
-            "7. When you have completed your analysis and are ready to provide a final answer, include \"FINAL RESPONSE:\" followed by your complete answer\n"
-            "8. If you're unsure what to do or the request is ambiguous, ask a clarifying question instead of guessing\n"
-            "9. If you identify useful combinations of tools for common tasks, you can make a `SUGGESTION:` for future improvements\n"
-            "---\n\n"
-        )
+        # Instructions section based on the current phase
+        instructions_section = ""
         
-        # Add phase-specific sections
-        full_prompt = ""
-        if phase == "context_assessment":
-            full_prompt = (
-                "## Context Assessment Phase:\n"
-                "Analyze the available information about the binary/program. Identify key areas of interest, "
-                "complexity points, and potential challenges. Focus on building a high-level understanding.\n"
-                "Please provide:\n"
-                "1. An overview of what you can determine about the program\n"
-                "2. Key areas that should be investigated\n"
-                "3. Potential challenges in analysis\n"
-                "4. Recommended approach based on available information\n"
+        if phase == "planning":
+            instructions_section = (
+                "## Planning Instructions:\n"
+                "1. Analyze the user request carefully\n"
+                "2. Create a detailed plan for addressing the query\n"
+                "3. Identify what information needs to be gathered from Ghidra\n"
+                "4. Specify which tools will be needed and in what order\n"
+                "5. Do NOT execute any commands yet - just create a plan\n"
+                "---\n\n"
             )
-        elif phase == "tool_selection":
-            full_prompt = (
-                "## Tool Selection Phase:\n"
-                "Based on the plan, identify the specific Ghidra tools needed to accomplish each step.\n"
-                "For each planned step, specify:\n"
-                "1. The exact tool command(s) that will be needed\n"
-                "2. Any parameters or options that should be specified\n"
-                "3. Alternative tools if the primary tool encounters issues\n"
+        elif phase == "execution" or (not phase and self.current_plan):
+            # If we're in execution phase or no specific phase with a plan already created
+            instructions_section = (
+                "## Tool Execution Instructions:\n"
+                "1. Follow the plan to execute necessary Ghidra tools\n"
+                "2. Use tools by writing `EXECUTE: tool_name(param1=value1, ...)` for each tool call\n"
+                "3. IMPORTANT FOR RENAME OPERATIONS: When using rename_function_by_address, "
+                "the function_address parameter must be the numerical address (e.g., '1800011a8'), not the function name (e.g., 'FUN_1800011a8')\n"
+                "4. Focus on gathering information, not on analyzing it yet\n"
+                "5. Execute the tools in a logical sequence\n"
+                "---\n\n"
+            )
+        elif phase == "analysis":
+            instructions_section = (
+                "## Analysis Instructions:\n"
+                "1. Analyze all the information gathered from the tool executions\n"
+                "2. Connect different pieces of information to form a coherent understanding\n"
+                "3. Focus on answering the user's original question comprehensively\n"
+                "4. Format your answer clearly and concisely\n"
+                "5. Prefix your final answer with 'FINAL RESPONSE:' to indicate completion\n"
+                "---\n\n"
+            )
+        else:
+            # Default instructions
+            instructions_section = (
+                "## Instructions:\n"
+                "1. Analyze the user request carefully based on available context\n"
+                "2. Use tools by writing `EXECUTE: tool_name(param1=value1, ...)` for each tool call\n"
+                "3. IMPORTANT FOR RENAME OPERATIONS: When using rename_function_by_address, "
+                "the function_address parameter must be the numerical address (e.g., '1800011a8'), not the function name (e.g., 'FUN_1800011a8')\n"
+                "4. Provide analysis along with your tool calls\n"
+                "5. Your response should be clear and concise\n"
+                "6. When you have completed your analysis, include \"FINAL RESPONSE:\" followed by your complete answer\n"
+                "---\n\n"
             )
         
         # Create the full prompt
-        full_prompt = capabilities_section + state_section + plan_section + history_section + instructions_section + full_prompt
+        full_prompt = capabilities_section + state_section + plan_section + history_section + instructions_section
         
-        # Add final response request based on the last message
+        # Add final context for user queries
         if self.context and self.context[-1]["role"] == "user":
-            if not self.current_plan:
-                full_prompt += (
-                    "## Planning Phase:\n"
-                    "Before executing tools, create a detailed plan outlining the steps you'll take to address the user's request.\n"
-                    "IMPORTANT: For any actions that modify content (like renaming functions or adding comments), you MUST explicitly "
-                    "execute these commands using the EXECUTE: format. Simply suggesting or stating an intention to rename/modify "
-                    "is not sufficient - you must output the actual command.\n"
-                )
+            if phase == "planning" or not self.current_plan:
+                full_prompt += "## User Query:\nPlease create a plan to address this query. Do not execute any commands yet.\n"
+            elif phase == "execution":
+                full_prompt += "## User Query:\nPlease execute the necessary tools to gather information for this query.\n"
+            elif phase == "analysis":
+                full_prompt += "## User Query:\nPlease analyze the gathered information and provide a comprehensive answer.\n"
             else:
-                full_prompt += "## Your Response:\n"
-        elif self.context and self.context[-1]["role"] == "review":
-            full_prompt += "## Continue Your Analysis:\nBased on the review feedback, continue your analysis or finalize your response.\n"
-        elif self.context and self.context[-1]["role"] == "planning":
-            full_prompt += "## Execute Plan:\nFollow the plan you created to address the user's request, executing tools as needed.\n"
+                full_prompt += "## User Query:\nPlease address this query using the available tools.\n"
             
         return full_prompt
     
@@ -397,7 +392,7 @@ class Bridge:
 
     def process_query(self, query: str) -> str:
         """
-        Process a natural language query through the AI with an enhanced agentic loop.
+        Process a natural language query through the AI with a simplified three-phase approach.
         
         Args:
             query: The user's query
@@ -405,17 +400,8 @@ class Bridge:
         Returns:
             The processed response with command results
         """
-        # Check if this is a summarization task before starting
-        is_summary_task = self._is_summarization_task(query)
-        if is_summary_task:
-            self.logger.info("Detected summarization/report task in query")
-        
         # Add the query to context
         self.context.append({"role": "user", "content": query})
-        
-        # Check if we need to summarize context before processing
-        if self._should_summarize_context():
-            self._summarize_context()
         
         # Initialize state for this query
         self.current_plan = None
@@ -427,175 +413,100 @@ class Bridge:
         tool_errors_encountered = False
         
         try:
-            # 1. Initial Context Assessment Phase
-            # This phase analyzes available information and sets the scope
-            context_assessment_result = self._run_context_assessment_phase()
-            if context_assessment_result.startswith("Context assessment failed") or context_assessment_result.startswith("Failed to build context assessment prompt"):
-                tool_errors_encountered = True
-                
-                # Check if it's a connection error with Ollama
-                if "[WinError 10061]" in context_assessment_result or "connection could be made" in context_assessment_result:
-                    final_response = (
-                        "Error: Could not connect to Ollama. Please check that:\n"
-                        "1. Ollama is running on your system\n"
-                        "2. It's accessible at http://localhost:11434\n"
-                        "3. The model 'cogito:32b' is available\n\n"
-                        "Full error: " + context_assessment_result
-                    )
+            # 1. PLANNING PHASE: Create a plan for addressing the query
+            self.logger.info("Starting planning phase")
+            
+            # Send to Ollama for planning
+            planning_prompt = self._build_structured_prompt(phase="planning")
+            planning_response = self.ollama.generate_with_phase(
+                planning_prompt,
+                phase="planning"
+            )
+            self.logger.info(f"Received planning response: {planning_response[:100]}...")
+            
+            # Extract planned tools from the plan
+            self._extract_planned_tools(planning_response)
+            
+            # Store the plan in the context and the state
+            self.current_plan = planning_response
+            self.context.append({"role": "plan", "content": planning_response})
+            
+            # Store in partial outputs for reporting
+            self.partial_outputs.append({
+                "type": "planning", 
+                "content": planning_response,
+                "phase": "planning"
+            })
+            
+            self.logger.info("Planning phase completed")
+            
+            # Check if this is a clarification request
+            if self._check_for_clarification_request(planning_response):
+                return planning_response
+            
+            # 2. EXECUTION PHASE: Execute tools based on the plan
+            execution_response = self._run_execution_phase()
+            
+            # 3. ANALYSIS PHASE: Analyze the results
+            self.logger.info("Starting analysis phase to generate final response")
+            analysis_prompt = self._build_structured_prompt(phase="analysis")
+            analysis_response = self.ollama.generate_with_phase(
+                analysis_prompt,
+                phase="analysis"
+            )
+            self.logger.info(f"Received analysis response: {analysis_response[:100]}...")
+            
+            # Extract the final response
+            if "FINAL RESPONSE:" in analysis_response:
+                # Extract the part after "FINAL RESPONSE:"
+                final_parts = analysis_response.split("FINAL RESPONSE:", 1)
+                if len(final_parts) > 1:
+                    final_response = final_parts[1].strip()
                 else:
-                    final_response = f"Error during context assessment: {context_assessment_result}"
-                return final_response
+                    final_response = analysis_response
+            else:
+                final_response = analysis_response
             
-            if self._check_for_clarification_request(context_assessment_result):
-                return context_assessment_result
-            
-            # 2. Planning Phase - Now with context assessment information
-            planning_result = self._run_planning_phase(context_assessment_result)
-            if self._check_for_clarification_request(planning_result):
-                return planning_result
-            
-            # 3. Tool Selection Phase - Identify tools needed for the task
-            tool_selection_result = self._run_tool_selection_phase()
-            if tool_selection_result.startswith("Unable to complete tool selection") or tool_selection_result.startswith("Unable to build tool selection prompt"):
-                tool_errors_encountered = True
-                final_response = f"Error during tool selection: {tool_selection_result}"
-                return final_response
-                
-            if self._check_for_clarification_request(tool_selection_result):
-                return tool_selection_result
-            
-            # 4. Primary Execution Loop - Execute tools with the selected models
-            execution_result = self._run_execution_phase()
-            if isinstance(execution_result, str) and execution_result:
-                # If it's a clarification request or error
-                return execution_result
-            
-            # 5. Verification Phase - Verify results against expectations
-            verification_result = self._run_verification_phase(execution_result or "")
-            
-            # 6. Review and Reasoning Phase - Evaluate completeness
-            final_response = verification_result  # Default to verification result in case of error
-            
-            # We don't have a direct _run_review_phase method as it's integrated with the execution phase
-            # For now, we'll just use the verification result
-            
-            # 7. Learning/Adaptation Phase - Only run on successful completions
-            if not tool_errors_encountered and final_response:
-                try:
-                    self._run_learning_phase(final_response)
-                except Exception as e:
-                    self.logger.error(f"Error in learning phase: {str(e)}")
-                    # Continue with the final response even if learning phase fails
+            # Clean up the response to remove any EXECUTE blocks
+            final_response = CommandParser.remove_commands(final_response)
             
             return final_response
         except Exception as e:
-            error_msg = f"Unexpected error in query processing: {str(e)}"
+            error_msg = f"Error in query processing: {str(e)}"
             self.logger.error(error_msg)
             return f"An unexpected error occurred: {str(e)}"
     
-    def _run_context_assessment_phase(self) -> str:
-        """Run the initial context assessment phase to analyze available information."""
-        self.logger.info("Starting context assessment phase")
-        
-        try:
-            # Build a prompt specifically for context assessment
-            assessment_prompt = self._build_structured_prompt(phase="context_assessment")
-            
-            try:
-                # Generate the context assessment using the specific model for this phase
-                assessment_response = self.ollama.generate_for_phase(
-                    "context_assessment", assessment_prompt
-                )
-                self.logger.info(f"Received context assessment: {assessment_response[:100]}...")
-                
-                # Store the assessment in the context
-                self.context.append({"role": "context_assessment", "content": assessment_response})
-                
-                # Store in partial outputs for reporting
-                self.partial_outputs.append({
-                    "type": "context_assessment",
-                    "content": assessment_response,
-                    "phase": "context_assessment"
-                })
-                
-                return assessment_response
-            except Exception as e:
-                error_msg = f"Error in context assessment phase: {str(e)}"
-                self.logger.error(error_msg)
-                # Store the error in context
-                error_response = f"Context assessment failed: {str(e)}"
-                self.context.append({"role": "context_assessment", "content": error_response})
-                return error_response  # Return error message to continue with planning phase
-        except Exception as e:
-            # Handle errors in building the prompt
-            error_msg = f"Error preparing context assessment prompt: {str(e)}"
-            self.logger.error(error_msg)
-            # Store the error in context
-            error_response = f"Failed to build context assessment prompt: {str(e)}"
-            self.context.append({"role": "context_assessment", "content": error_response})
-            return error_response  # Return error message to continue with planning phase
-
-    def _run_planning_phase(self, context_assessment_result: str) -> str:
-        """Run the planning phase with context assessment information."""
+    def _run_planning_phase(self) -> str:
+        """Run the planning phase to determine what tools to use."""
         self.logger.info("Starting planning phase")
         
-        # Build a plan based on the context assessment result
-        plan_text = f"Based on the context assessment, the plan is to: {context_assessment_result}"
+        # Build the structured prompt with the current state
+        planning_prompt = self._build_structured_prompt("planning")
+        
+        # Send to Ollama for planning
+        planning_response = self.ollama.generate_with_phase(
+            planning_prompt,
+            phase="planning"
+        )
+        self.logger.info(f"Received planning response: {planning_response[:100]}...")
         
         # Extract planned tools from the plan
-        self._extract_planned_tools(plan_text)
+        self._extract_planned_tools(planning_response)
         
         # Store the plan in the context and the state
-        self.current_plan = plan_text
-        self.context.append({"role": "plan", "content": plan_text})
+        self.current_plan = planning_response
+        self.context.append({"role": "plan", "content": planning_response})
         
-        # Store planning phase output
+        # Store in partial outputs for reporting
         self.partial_outputs.append({
             "type": "planning", 
-            "content": plan_text,
+            "content": planning_response,
             "phase": "planning"
         })
         
         self.logger.info("Planning phase completed")
         
-        return plan_text
-
-    def _run_tool_selection_phase(self) -> str:
-        """Run the tool selection phase to identify specific tools needed for the task."""
-        self.logger.info("Starting tool selection phase")
-        
-        try:
-            # Build a tool selection prompt
-            tool_selection_prompt = self._build_structured_prompt(phase="tool_selection")
-            
-            try:
-                # Get AI to select tools
-                tool_selection_response = self.ollama.generate_for_phase(
-                    "tool_selection", tool_selection_prompt
-                )
-                self.logger.info(f"Received tool selection response: {tool_selection_response[:100]}...")
-                
-                # Extract tool suggestions
-                tool_selection_response, suggestions = self._extract_suggestions(tool_selection_response)
-                
-                # Extract planned tools from the response
-                self._extract_planned_tools(tool_selection_response)
-                
-                # Store the tool selection result in the context
-                self.context.append({"role": "tool_selection", "content": tool_selection_response})
-                
-                self.logger.info("Tool selection phase completed")
-                
-                return tool_selection_response
-            except Exception as e:
-                error_msg = f"Error in tool selection phase: {str(e)}"
-                self.logger.error(error_msg)
-                return f"Unable to complete tool selection: {str(e)}"  # Return error message
-        except Exception as e:
-            # Handle errors in building the prompt
-            error_msg = f"Error preparing tool selection prompt: {str(e)}"
-            self.logger.error(error_msg)
-            return f"Unable to build tool selection prompt: {str(e)}"  # Return error message
+        return planning_response
 
     def _run_execution_phase(self) -> str:
         """Run the execution phase to execute the selected tools."""
@@ -606,10 +517,6 @@ class Bridge:
         unknown_commands_attempted = set()
         
         for step in range(self.max_agent_steps):
-            # Check if we should summarize context
-            if self._should_summarize_context():
-                self._summarize_context()
-                
             # Build the structured prompt with the current state and plan
             prompt = self._build_structured_prompt()
             
@@ -618,8 +525,9 @@ class Bridge:
             
             try:
                 # Get AI response
-                ai_response = self.ollama.generate_for_phase(
-                    "execution", prompt
+                ai_response = self.ollama.generate_with_phase(
+                    prompt,
+                    phase="execution"
                 )
                 self.logger.info(f"Received response from Ollama: {ai_response[:100]}...")
                 
@@ -719,11 +627,7 @@ class Bridge:
         review_step = 0
         has_final_response = False
         
-        while review_step < self.max_review_rounds and not has_final_response:
-            # Check if we should summarize context
-            if self._should_summarize_context():
-                self._summarize_context()
-                
+        while review_step < self.max_agent_steps and not has_final_response:
             # Check if current final_response already contains "FINAL RESPONSE"
             if "FINAL RESPONSE:" in final_response:
                 # Extract the part after "FINAL RESPONSE:"
@@ -792,193 +696,70 @@ class Bridge:
             prompt = self._build_structured_prompt()
             
             # Send to Ollama for review
-            self.logger.info(f"Review step {review_step+1}/{self.max_review_rounds}: Asking AI to review response")
+            self.logger.info(f"Review step {review_step+1}/{self.max_agent_steps}: Sending query to Ollama")
+            ai_review_response = self.ollama.generate_with_phase(
+                prompt,
+                phase="analysis"
+            )
+            self.logger.info(f"Received review response: {ai_review_response[:100]}...")
             
-            try:
-                # Get AI's review response
-                ai_review_response = self.ollama.generate_for_phase(
-                    "review", prompt
-                )
-                self.logger.info(f"Received review response: {ai_review_response[:100]}...")
+            # Check if this is a clarification request
+            if self._check_for_clarification_request(ai_review_response):
+                self.logger.info("AI is requesting clarification from user during review")
+                return ai_review_response  # Return the question directly to the user
                 
-                # Capture the full review response as logged
-                self.partial_outputs.append({
-                    "type": "raw_review",
-                    "content": ai_review_response,
-                    "review_step": review_step + 1
-                })
+            # Extract any tool suggestions
+            ai_review_response, suggestions = self._extract_suggestions(ai_review_response)
+            
+            # Clean the response and update
+            clean_review = self._remove_commands(ai_review_response)
+            if clean_review.strip():
+                self.context.append({"role": "assistant", "content": clean_review.strip()})
+                final_response = clean_review.strip()
                 
-                # Check if this is a clarification request
-                if self._check_for_clarification_request(ai_review_response):
-                    self.logger.info("AI is requesting clarification from user during review")
-                    return ai_review_response  # Return the question directly to the user
+                # Check if this response has the final marker
+                if "FINAL RESPONSE:" in clean_review:
+                    # Extract the part after "FINAL RESPONSE:"
+                    final_parts = clean_review.split("FINAL RESPONSE:", 1)
+                    potential_final = ""
+                    if len(final_parts) > 1:
+                        potential_final = final_parts[1].strip()
                     
-                # Extract any tool suggestions
-                ai_review_response, suggestions = self._extract_suggestions(ai_review_response)
-                
-                # Clean the response and update
-                clean_review = self._remove_commands(ai_review_response)
-                if clean_review.strip():
-                    self.context.append({"role": "assistant", "content": clean_review.strip()})
-                    final_response = clean_review.strip()
+                    # Check for implied actions without commands
+                    implied_actions_prompt = self._check_implied_actions_without_commands(final_response)
+                    if implied_actions_prompt:
+                        self.logger.info("Found implied actions without commands in final response")
+                        # Add a prompt for the next round asking for explicit commands
+                        self.context.append({"role": "review", "content": implied_actions_prompt})
+                        continue  # Skip to next review round
                     
-                    # Store the review reasoning as a partial output
-                    self.partial_outputs.append({
-                        "type": "review",
-                        "content": clean_review.strip(),
-                        "review_step": review_step + 1
-                    })
-                    
-                    # Check if this response has the final marker
-                    if "FINAL RESPONSE:" in clean_review:
-                        # Extract the part after "FINAL RESPONSE:"
-                        final_parts = clean_review.split("FINAL RESPONSE:", 1)
-                        potential_final = ""
-                        if len(final_parts) > 1:
-                            potential_final = final_parts[1].strip()
-                        
-                        # Check for implied actions without commands
-                        implied_actions_prompt = self._check_implied_actions_without_commands(clean_review)
-                        if implied_actions_prompt:
-                            self.logger.info("Found implied actions without commands in review response")
-                            # Add a prompt for the next round asking for explicit commands
-                            self.context.append({"role": "review", "content": implied_actions_prompt})
-                            continue  # Skip to next review round
-                        
-                        # Check the quality of the final response
-                        if self._check_final_response_quality(potential_final):
+                    # Check the quality of the final response
+                    if self._check_final_response_quality(potential_final):
+                        has_final_response = True
+                        self.logger.info("Found high-quality 'FINAL RESPONSE' marker in review, ending review loop")
+                        final_response = potential_final
+                        break
+                    else:
+                        # If tool errors were encountered and we're near the end of review rounds, accept the response anyway
+                        if tool_errors_encountered and review_step >= self.max_agent_steps - 2:
                             has_final_response = True
-                            self.logger.info("Found high-quality 'FINAL RESPONSE' marker in review, ending review loop")
+                            self.logger.info("Accepting final response despite limitations due to tool errors")
                             final_response = potential_final
                             break
                         else:
-                            # If tool errors were encountered and we're near the end of review rounds, accept the response anyway
-                            if tool_errors_encountered and review_step >= self.max_review_rounds - 2:
-                                has_final_response = True
-                                self.logger.info("Accepting final response despite limitations due to tool errors")
-                                final_response = potential_final
-                                break
-                            else:
-                                self.logger.info("Found 'FINAL RESPONSE' marker but response indicates limitations, continuing review")
-                
-                # Process any additional commands if present
-                commands = CommandParser.extract_commands(ai_review_response)
-                if commands:
-                    self.logger.info(f"Found {len(commands)} additional commands in review response")
-                    # Execute each command and add to context (similar to primary loop)
-                    for cmd_name, cmd_params in commands:
-                        # Add tool call to context
-                        params_str = ", ".join([f"{k}=\"{v}\"" for k, v in cmd_params.items()])
-                        tool_call = f"EXECUTE: {cmd_name}({params_str})"
-                        self.context.append({"role": "tool_call", "content": tool_call})
-                        
-                        # Execute the command
-                        result = self._execute_single_command(cmd_name, cmd_params)
-                        
-                        # Add result to context
-                        self.context.append({"role": "tool_result", "content": result})
-                        
-                        # Update planned tools tracker
-                        self._mark_tool_as_executed(cmd_name, cmd_params)
-                        
-                        # Check if this was an error and track unknown commands
-                        if "ERROR: Unknown command" in result:
-                            unknown_commands_attempted.add(cmd_name)
-                            tool_errors_encountered = True
-                        
-                        # Store the tool result from review as a partial output
-                        self.partial_outputs.append({
-                            "type": "review_tool_result",
-                            "tool": cmd_name,
-                            "params": cmd_params,
-                            "result": result,
-                            "review_step": review_step + 1
-                        })
+                            self.logger.info("Found 'FINAL RESPONSE' marker but response indicates limitations, continuing review")
             
-            except Exception as e:
-                error_msg = f"Error in review step {review_step+1}: {str(e)}"
-                self.logger.error(error_msg)
-                if not final_response:  # Only set if we don't already have a response
-                    final_response = f"Sorry, I encountered an error during review: {str(e)}"
-                break
-                
             review_step += 1
                 
         # If we exited the loop without finding a final response marker, just use what we have
         if not has_final_response:
-            self.logger.info(f"Reached maximum review rounds ({self.max_review_rounds}) without final response marker")
+            self.logger.info(f"Reached maximum review rounds ({self.max_agent_steps}) without final response marker")
             
             # Generate a cohesive report from partial outputs if no final response marker was found
             final_response = self._generate_cohesive_report()
             
         return final_response
     
-    def _run_verification_phase(self, execution_result: str) -> str:
-        """Run the verification phase to verify results against expectations."""
-        self.logger.info("Starting verification phase")
-        
-        # Build a verification prompt
-        verification_prompt = self._build_structured_prompt(phase="verification")
-        
-        try:
-            # Get AI to verify the results
-            verification_response = self.ollama.generate_for_phase(
-                "verification", verification_prompt
-            )
-            self.logger.info(f"Received verification response: {verification_response[:100]}...")
-            
-            # Store the verification result in the context
-            self.context.append({"role": "verification", "content": verification_response})
-            
-            # Store in partial outputs for reporting
-            self.partial_outputs.append({
-                "type": "verification",
-                "content": verification_response,
-                "phase": "verification"
-            })
-            
-            return verification_response
-        except Exception as e:
-            error_msg = f"Error in verification phase: {str(e)}"
-            self.logger.error(error_msg)
-            return ""  # Return empty string to continue with learning phase
-
-    def _run_learning_phase(self, final_response: str) -> None:
-        """Run the learning phase to extract patterns and update knowledge for future use."""
-        self.logger.info("Starting learning phase")
-        
-        # Build a learning prompt
-        learning_prompt = self._build_structured_prompt(phase="learning")
-        
-        try:
-            # Get AI to learn from the final response
-            learning_response = self.ollama.generate_for_phase(
-                "learning", learning_prompt
-            )
-            self.logger.info(f"Received learning response: {learning_response[:100]}...")
-            
-            # Store the learning result in the context
-            self.context.append({"role": "learning", "content": learning_response})
-            
-            # Store in partial outputs for reporting
-            self.partial_outputs.append({
-                "type": "learning",
-                "content": learning_response,
-                "phase": "learning"
-            })
-            
-            # Update analysis state based on the learning response
-            self._update_analysis_state_from_learning(learning_response)
-        except Exception as e:
-            error_msg = f"Error in learning phase: {str(e)}"
-            self.logger.error(error_msg)
-
-    def _update_analysis_state_from_learning(self, learning_response: str) -> None:
-        """Update the internal analysis state based on the learning response."""
-        # Implement the logic to update the analysis state based on the learning response
-        # This is a placeholder and should be replaced with the actual implementation
-        pass
-
     def _remove_commands(self, text: str) -> str:
         """
         Remove EXECUTE command blocks from text to get the clean response.
@@ -1053,6 +834,7 @@ class Bridge:
     def _parse_and_execute_commands(self, response: str) -> str:
         """
         Parse the AI response to identify and execute GhidraMCP commands.
+        Supports both traditional EXECUTE: format and JSON tool format.
         
         Args:
             response: The AI's response text
@@ -1060,7 +842,7 @@ class Bridge:
         Returns:
             The processed response with command results
         """
-        # Extract commands using the CommandParser
+        # Extract commands using the CommandParser (now handles both formats)
         commands = CommandParser.extract_commands(response)
         
         if not commands:
@@ -1082,29 +864,51 @@ class Bridge:
                     if isinstance(cmd_result, dict) and "error" in cmd_result:
                         error_msg = f"ERROR: {cmd_result.get('error')}"
                         self.logger.error(error_msg)
-                        # Replace the command with the error message
+                        
+                        # Try to replace both traditional and JSON formats
+                        # Traditional format replacement
                         command_str = f"EXECUTE: {command_name}({', '.join([f'{k}=\"{v}\"' for k, v in params.items()])})"
                         response = response.replace(command_str, error_msg)
+                        
+                        # JSON format replacement (more complex)
+                        json_pattern = re.compile(r'```json\s*\{\s*"tool"\s*:\s*"' + re.escape(command_name) + r'"\s*,.*?\}\s*```', re.DOTALL)
+                        response = re.sub(json_pattern, error_msg, response)
                     else:
                         # Format the command result
                         formatted_result = f"RESULT: {json.dumps(cmd_result, indent=2)}"
                         
-                        # Replace the command with the result in the response
+                        # Replace both traditional and JSON formats
+                        # Traditional format replacement
                         command_str = f"EXECUTE: {command_name}({', '.join([f'{k}=\"{v}\"' for k, v in params.items()])})"
                         response = response.replace(command_str, formatted_result)
+                        
+                        # JSON format replacement
+                        json_pattern = re.compile(r'```json\s*\{\s*"tool"\s*:\s*"' + re.escape(command_name) + r'"\s*,.*?\}\s*```', re.DOTALL)
+                        response = re.sub(json_pattern, formatted_result, response)
                 else:
                     error_msg = f"ERROR: Unknown command '{command_name}'"
                     self.logger.error(error_msg)
-                    # Replace the command with the error message
+                    
+                    # Replace both traditional and JSON formats
+                    # Traditional format replacement
                     command_str = f"EXECUTE: {command_name}({', '.join([f'{k}=\"{v}\"' for k, v in params.items()])})"
                     response = response.replace(command_str, error_msg)
+                    
+                    # JSON format replacement
+                    json_pattern = re.compile(r'```json\s*\{\s*"tool"\s*:\s*"' + re.escape(command_name) + r'"\s*,.*?\}\s*```', re.DOTALL)
+                    response = re.sub(json_pattern, error_msg, response)
             except Exception as e:
-                error_msg = f"ERROR: Failed to execute '{command_name}': {str(e)}"
+                # Handle any exceptions during execution
+                error_msg = f"ERROR executing {command_name}: {str(e)}"
                 self.logger.error(error_msg)
-                # Replace the command with the error message
+                
+                # Replace both formats
                 command_str = f"EXECUTE: {command_name}({', '.join([f'{k}=\"{v}\"' for k, v in params.items()])})"
                 response = response.replace(command_str, error_msg)
-        
+                
+                json_pattern = re.compile(r'```json\s*\{\s*"tool"\s*:\s*"' + re.escape(command_name) + r'"\s*,.*?\}\s*```', re.DOTALL)
+                response = re.sub(json_pattern, error_msg, response)
+                
         return response
     
     def health_check(self) -> Dict[str, bool]:
@@ -1126,12 +930,11 @@ class Bridge:
         Returns:
             True if context should be summarized, False otherwise
         """
-        return len(self.context) >= self.context_summarization_threshold
+        return len(self.context) >= self.config.context_limit * 0.8
     
     def _summarize_context(self) -> None:
         """
         Summarize the conversation context to preserve key information while reducing length.
-        Uses the specialized summarization model if configured.
         """
         if len(self.context) <= 5:  # Don't summarize very short contexts
             return
@@ -1162,11 +965,12 @@ class Bridge:
         summarization_prompt = f"{context_text}\n\n{summarization_instruction}"
         
         try:
-            # Ask the LLM to summarize using the specialized model
+            # Ask the LLM to summarize
             self.logger.info("Summarizing conversation context")
-            summary = self.ollama.generate_with_summarization_model(
-                summarization_prompt, 
-                "You are a helpful assistant tasked with summarizing technical conversations about reverse engineering."
+            summary = self.ollama.generate_with_phase(
+                summarization_prompt,
+                phase="analysis",
+                system_prompt="You are a helpful assistant tasked with summarizing technical conversations about reverse engineering."
             )
             
             # Replace the old context items with the new summary
@@ -1272,12 +1076,10 @@ class Bridge:
 
     def _generate_cohesive_report(self) -> str:
         """
-        Generate a cohesive report from partial outputs collected during the agentic process.
-        This combines all reasoning steps, planning, tool results, and errors into a structured report.
-        Uses a specialized summarization model if configured.
+        Generate a cohesive report from various data gathered during the analysis.
         
         Returns:
-            A cohesive report combining all partial outputs
+            A comprehensive report as a string
         """
         if not self.partial_outputs:
             return "No analysis was performed or captured."
@@ -1428,27 +1230,7 @@ class Bridge:
         # Option 1: Build a structured report manually
         report = self._build_structured_report(report_sections)
         
-        # Option 2: Use a specialized summarization model to generate the report
-        if self.config.ollama.summarization_model:
-            try:
-                # Prepare the input for the summarization model by converting our report_sections to text
-                summarization_input = self._prepare_summarization_input(report_sections)
-                
-                self.logger.info("Generating comprehensive report using specialized summarization model")
-                ai_generated_report = self.ollama.generate_with_summarization_model(summarization_input)
-                
-                # If the AI-generated report is too short or empty, fall back to our structured report
-                if len(ai_generated_report.strip()) < 100:
-                    self.logger.warning("AI-generated report was too short, using structured report instead")
-                    return report
-                
-                return ai_generated_report
-            except Exception as e:
-                self.logger.error(f"Error generating report with summarization model: {str(e)}")
-                # Fall back to structured report on error
-                return report
-        
-        # Return the manually structured report if no specialized model
+        # Return the manually structured report
         return report
         
     def _build_structured_report(self, report_sections):
@@ -1493,85 +1275,6 @@ class Bridge:
         
         return report.strip()
     
-    def _prepare_summarization_input(self, report_sections):
-        """
-        Prepare the input for the summarization model by converting our report sections to text.
-        
-        Args:
-            report_sections: Dict of report sections
-            
-        Returns:
-            A formatted string to send to the summarization model
-        """
-        input_parts = []
-        
-        input_parts.append("# Analysis Information\n")
-        input_parts.append("Please generate a comprehensive analysis report based on the following information:\n")
-        
-        if report_sections["plan"]:
-            input_parts.append("\n## Initial Plan:\n")
-            for plan in report_sections["plan"]:
-                input_parts.append(plan)
-        
-        if report_sections["insights"]:
-            input_parts.append("\n## Key Insights Found:\n")
-            for idx, insight in enumerate(report_sections["insights"], 1):
-                input_parts.append(f"{idx}. {insight}")
-        
-        if report_sections["findings"]:
-            input_parts.append("\n## Findings:\n")
-            for finding in report_sections["findings"]:
-                input_parts.append(f"- {finding}")
-        
-        if report_sections["analysis"]:
-            input_parts.append("\n## Technical Analysis Details:\n")
-            for analysis in report_sections["analysis"]:
-                input_parts.append(analysis + "\n")
-        
-        if report_sections["tools"]:
-            input_parts.append("\n## Tools Used:\n")
-            for tool in report_sections["tools"]:
-                input_parts.append(f"- {tool}")
-        
-        if report_sections["errors"]:
-            input_parts.append("\n## Errors Encountered:\n")
-            for error in report_sections["errors"]:
-                input_parts.append(f"- {error}")
-        
-        if report_sections["conclusions"]:
-            input_parts.append("\n## Preliminary Conclusions:\n")
-            for conclusion in report_sections["conclusions"]:
-                input_parts.append(conclusion)
-                
-        input_parts.append("\n# Report Format Request:\n")
-        input_parts.append("Please organize this information into a well-structured analysis report with clear sections.")
-        input_parts.append("Include an executive summary at the beginning and a conclusion at the end.")
-        input_parts.append("Format your response using Markdown, with appropriate headers, bullet points, and emphasis.")
-        
-        return "\n".join(input_parts)
-
-    def _is_summarization_task(self, query: str) -> bool:
-        """
-        Detect if the query is asking for a summarization or report.
-        
-        Args:
-            query: The user's query
-            
-        Returns:
-            True if the query appears to be requesting a summary or report
-        """
-        # Look for keywords that indicate a summarization task
-        summarization_keywords = [
-            "summarize", "summarization", "summary",
-            "report", "overview", 
-            "analyze the results", "final analysis",
-            "produce a report", "generate a report",
-            "compile", "findings", "conclude",
-        ]
-        
-        query_lower = query.lower()
-        return any(keyword in query_lower for keyword in summarization_keywords)
-
     def _extract_planned_tools(self, plan_text: str) -> None:
         """
         Extract planned tool calls from the AI's planning response.
@@ -1733,143 +1436,151 @@ def main():
     parser.add_argument("--ollama-url", help="Ollama server URL")
     parser.add_argument("--ghidra-url", help="GhidraMCP server URL")
     parser.add_argument("--model", help="Ollama model to use")
-    parser.add_argument("--summarization-model", help="Specialized model to use for summarization and report generation (defaults to main model if not specified)")
     
     # Add model arguments for each phase
     parser.add_argument("--planning-model", help="Model to use for the planning phase")
     parser.add_argument("--execution-model", help="Model to use for the execution phase")
-    parser.add_argument("--review-model", help="Model to use for the review phase")
-    parser.add_argument("--verification-model", help="Model to use for the verification phase")
-    parser.add_argument("--learning-model", help="Model to use for the learning phase")
+    parser.add_argument("--analysis-model", help="Model to use for the analysis phase")
     
     parser.add_argument("--interactive", action="store_true", help="Run in interactive mode")
-    parser.add_argument("--health-check", action="store_true", help="Check health of services and exit")
-    parser.add_argument("--mock", action="store_true", help="Run in mock mode (no GhidraMCP server needed)")
-    parser.add_argument("--include-capabilities", action="store_true", 
-                        help="Include capabilities context from ai_ghidra_capabilities.txt in prompts")
-    parser.add_argument("--max-steps", type=int, default=5, 
-                        help="Maximum number of steps for agentic execution loop (default: 5)")
-    parser.add_argument("--max-review-rounds", type=int, default=3,
-                        help="Maximum number of review rounds after tool execution (default: 3)")
-    parser.add_argument("--list-models", action="store_true", 
-                        help="List available models from Ollama server and exit")
+    parser.add_argument("--list-models", action="store_true", help="List available models")
+    parser.add_argument("--list-context", action="store_true", help="List current conversation context")
+    parser.add_argument("--mock", action="store_true", help="Run in mock mode (simulated GhidraMCP)")
+    parser.add_argument("--log-level", help="Set log level (DEBUG, INFO, WARNING, ERROR)")
+    parser.add_argument("--include-capabilities", action="store_true", help="Include capabilities.txt content in prompts")
+    parser.add_argument("--max-steps", type=int, default=5, help="Maximum number of steps for agentic execution loop")
+    
     args = parser.parse_args()
     
-    # Load config from environment variables
-    config = BridgeConfig.from_env()
+    # Set log level from arguments or environment
+    if args.log_level:
+        os.environ["LOG_LEVEL"] = args.log_level
+        
+    # Configure based on arguments and environment variables
+    config = BridgeConfig()
     
-    # Override with command line arguments if provided
+    # Override with command line arguments
     if args.ollama_url:
         config.ollama.base_url = args.ollama_url
     if args.ghidra_url:
         config.ghidra.base_url = args.ghidra_url
     if args.model:
         config.ollama.model = args.model
-    if args.summarization_model:
-        config.ollama.summarization_model = args.summarization_model
     if args.mock:
         config.ghidra.mock_mode = True
-        print("Running in MOCK mode - No GhidraMCP server required")
+        
+    # Handle model switching - update the model map
+    if args.planning_model:
+        config.ollama.model_map["planning"] = args.planning_model
+    if args.execution_model:
+        config.ollama.model_map["execution"] = args.execution_model
+    if args.analysis_model:
+        config.ollama.model_map["analysis"] = args.analysis_model
+        
+    # Initialize clients
+    ollama_client = OllamaClient(config.ollama)
+    ghidra_client = GhidraMCPClient(config.ghidra)
     
-    # Set up model map from command-line arguments
-    model_map = {}
-    phase_models = [
-        ("planning", args.planning_model),
-        ("execution", args.execution_model),
-        ("review", args.review_model),
-        ("verification", args.verification_model),
-        ("learning", args.learning_model),
-        # Summarization uses the summarization_model parameter
-    ]
-    
-    for phase, model in phase_models:
-        if model:
-            model_map[phase] = model
-    
-    # Only update if at least one model was specified
-    if model_map:
-        config.ollama.model_map.update(model_map)
-    
-    # Pass the flag to the Bridge constructor
-    bridge = Bridge(
-        config, 
-        include_capabilities=args.include_capabilities,
-        max_agent_steps=args.max_steps,
-        max_review_rounds=args.max_review_rounds
-    )
-    
-    # List models and exit if requested
+    # List models if requested
     if args.list_models:
-        try:
-            models = bridge.ollama.list_models()
+        models = ollama_client.list_models()
+        if models:
             print("Available Ollama models:")
             for model in models:
-                print(f"- {model}")
-            sys.exit(0)
-        except Exception as e:
-            print(f"Error listing models: {str(e)}")
-            sys.exit(1)
+                print(f"  - {model}")
+        else:
+            print("No models found or error connecting to Ollama")
+        return 0
     
-    if args.health_check:
-        status = bridge.health_check()
-        print(f"Ollama Health: {'OK' if status['ollama'] else 'FAIL'}")
-        print(f"GhidraMCP Health: {'OK' if status['ghidra'] else 'FAIL'}")
-        sys.exit(0 if all(status.values()) else 1)
+    # Initialize the bridge
+    bridge = Bridge(
+        config=config,
+        include_capabilities=args.include_capabilities,
+        max_agent_steps=args.max_steps
+    )
     
+    # Health check for Ollama and GhidraMCP
+    ollama_health = "OK" if ollama_client.check_health() else "FAIL"
+    ghidra_health = "OK" if ghidra_client.check_health() else "FAIL"
+    
+    # List context if requested
+    if args.list_context:
+        print("\nCurrent conversation context:")
+        for i, item in enumerate(bridge.context):
+            print(f"{i}: {item.get('role', 'unknown')}: {item.get('content', '')[:50]}...")
+        return 0
+    
+    # Interactive mode
     if args.interactive:
-        print("Ollama-GhidraMCP Bridge (Interactive Mode)")
+        # Display banner
+        print(
+            "╔══════════════════════════════════════════════════════════════════╗\n"
+            "║                                                                  ║\n"
+            "║  OGhidra - Simplified Three-Phase Architecture                   ║\n"
+            "║  ------------------------------------------                      ║\n"
+            "║                                                                  ║\n"
+            "║  1. Planning Phase: Create a plan for addressing the query       ║\n"
+            "║  2. Tool Calling Phase: Execute tools to gather information      ║\n"
+            "║  3. Analysis Phase: Analyze results and provide answers          ║\n"
+            "║                                                                  ║\n"
+            "║  For more information, see README-ARCHITECTURE.md                ║\n"
+            "║                                                                  ║\n"
+            "╚══════════════════════════════════════════════════════════════════╝"
+        )
+        
+        print(f"Ollama-GhidraMCP Bridge (Interactive Mode)")
         print(f"Default model: {config.ollama.model}")
         
-        # Print phase-specific models if configured
-        for phase, model in config.ollama.model_map.items():
-            if model:
-                print(f"Model for {phase} phase: {model}")
-                
-        if config.ollama.summarization_model:
-            print(f"Model for summarization: {config.ollama.summarization_model}")
-            
-        print(f"Capabilities included: {'Yes' if args.include_capabilities else 'No'}")
-        print(f"Tool execution steps: {bridge.max_agent_steps}")
-        print(f"Review rounds: {bridge.max_review_rounds}")
-        print("Type 'exit' or 'quit' to exit, 'models' to list available models")
+        # Show health status
+        if ollama_health != "OK" or ghidra_health != "OK":
+            print(f"Health check: Ollama: {ollama_health}, GhidraMCP: {ghidra_health}")
         
+        # Main interaction loop
         while True:
             try:
-                query = input("\nQuery: ")
-                if query.lower() in ("exit", "quit"):
+                prompt = input("\nQuery (or 'exit', 'quit', 'health', 'models'): ")
+                
+                if prompt.lower() in ["exit", "quit"]:
                     break
                     
-                if query.lower() == "health":
-                    status = bridge.health_check()
-                    print(f"Ollama Health: {'OK' if status['ollama'] else 'FAIL'}")
-                    print(f"GhidraMCP Health: {'OK' if status['ghidra'] else 'FAIL'}")
-                    continue
+                elif prompt.lower() == "health":
+                    ollama_health = "OK" if ollama_client.check_health() else "FAIL"
+                    ghidra_health = "OK" if ghidra_client.check_health() else "FAIL"
+                    print(f"Health check: Ollama: {ollama_health}, GhidraMCP: {ghidra_health}")
                     
-                if query.lower() == "models":
-                    try:
-                        models = bridge.ollama.list_models()
-                        print("\nAvailable Ollama models:")
+                elif prompt.lower() == "models":
+                    models = ollama_client.list_models()
+                    if models:
+                        print("Available Ollama models:")
                         for model in models:
-                            print(f"- {model}")
-                    except Exception as e:
-                        print(f"Error listing models: {str(e)}")
-                    continue
+                            print(f"  - {model}")
+                    else:
+                        print("No models found or error connecting to Ollama")
+                        
+                elif prompt.strip():  # Only process non-empty prompts
+                    response = bridge.process_query(prompt)
+                    print(f"\n{response}")
                     
-                response = bridge.process_query(query)
-                print("\nResponse:")
-                print(response)
-                
             except KeyboardInterrupt:
                 print("\nExiting...")
                 break
+                
             except Exception as e:
-                bridge.logger.error(f"Error: {str(e)}")
                 print(f"Error: {str(e)}")
+                
+        return 0
+        
+    # Non-interactive mode - process input from stdin
     else:
-        # Non-interactive mode - read from stdin
-        query = sys.stdin.read().strip()
-        response = bridge.process_query(query)
-        print(response)
+        user_input = ""
+        for line in sys.stdin:
+            user_input += line
+            
+        if user_input.strip():
+            response = bridge.process_query(user_input)
+            print(response)
+            
+        return 0
 
 if __name__ == "__main__":
     main() 

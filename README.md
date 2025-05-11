@@ -19,9 +19,8 @@ This bridge connects the following components:
 - **Context Management**: Maintains conversation context for multi-step analyses
 - **Interactive Mode**: Command-line interface for interactive sessions
 - **Health Checks**: Verify connectivity to Ollama and GhidraMCP services
-- **Specialized Summarization Model**: Use a separate model optimized for generating comprehensive reports
 - **Model Switching**: Use different models for different phases of the agentic loop
-- **Agentic Capabilities**: Multi-step reasoning with planning, execution, review, and learning phases
+- **Agentic Capabilities**: Multi-step reasoning with planning, execution, and analysis phases
 
 ## Requirements
 
@@ -79,43 +78,16 @@ python main.py --interactive --model llama3 --planning-model llama3 --execution-
 Available phase-specific models:
 - `--planning-model`: Model for the planning phase (creating analysis plans)
 - `--execution-model`: Model for the execution phase (running tools)
-- `--review-model`: Model for the review phase (evaluating results)
-- `--verification-model`: Model for the verification phase
-- `--learning-model`: Model for the learning phase
-- `--summarization-model`: Model for summarization tasks
+- `--analysis-model`: Model for the analysis phase (evaluating results)
 
 You can also configure these via environment variables:
 ```
 OLLAMA_MODEL_PLANNING=llama3
 OLLAMA_MODEL_EXECUTION=codellama:7b
+OLLAMA_MODEL_ANALYSIS=llama3:34b
 ```
 
 For more detailed information about model switching, see [README-MODEL-SWITCHING.md](README-MODEL-SWITCHING.md).
-
-### Using the Specialized Summarization Model
-
-You can configure a separate model specifically for summarization and report generation tasks:
-
-```bash
-python main.py --interactive --model llama3 --summarization-model mixtral:8x7b
-```
-
-The summarization model will be used for:
-1. Generating final reports when analysis is complete
-2. Summarizing long conversation contexts
-3. Processing queries that specifically ask for summaries or reports
-
-You can also set this in your `.env` file:
-```
-OLLAMA_MODEL=llama3
-OLLAMA_SUMMARIZATION_MODEL=mixtral:8x7b
-```
-
-This is particularly useful when you want to use:
-- A lightweight model for interactive analysis and tool execution
-- A more powerful model for creating comprehensive, well-structured reports
-
-The system automatically detects summarization/report requests by looking for keywords like "summarize", "report", "analyze the results", etc.
 
 ### Mock Mode
 

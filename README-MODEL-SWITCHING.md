@@ -8,19 +8,16 @@ OGhidra's AI bridge now supports using different models for different phases of 
 
 1. Use a larger, more capable model for planning and reasoning
 2. Use a smaller, faster model for execution phases
-3. Customize models for specific tasks like summarization or verification
+3. Customize models for specific tasks like analysis
 4. Experiment with models that excel at different aspects of the reverse engineering workflow
 
 ## Phases of the Agentic Loop
 
-The bridge's agentic loop consists of several phases, each of which can use a different model:
+The bridge's agentic loop consists of three main phases, each of which can use a different model:
 
-- **Planning**: Initial planning phase where the AI creates a plan of action
-- **Execution**: Main phase where tools are executed and analysis is performed
-- **Review**: Phase where the AI reviews its work and decides if more analysis is needed
-- **Verification**: Phase to verify the final results
-- **Learning**: Phase where patterns are identified for future analysis
-- **Summarization**: Special phase for context summarization (not a standard phase, but uses the summarization model)
+- **Planning**: Initial phase where the AI creates a plan of action based on the user query
+- **Execution**: Phase where tools are executed to gather data from Ghidra
+- **Analysis**: Final phase where the AI analyzes results and provides a comprehensive answer
 
 ## Configuration Methods
 
@@ -29,7 +26,7 @@ The bridge's agentic loop consists of several phases, each of which can use a di
 You can specify different models for each phase using command line arguments:
 
 ```bash
-python -m src.bridge --model llama3 --planning-model llama3:8b --execution-model codellama:7b --review-model mistral:7b --summarization-model llama3
+python -m src.bridge --model llama3 --planning-model llama3:8b --execution-model codellama:7b --analysis-model llama3:34b
 ```
 
 To list all available models:
@@ -46,8 +43,7 @@ You can also configure models using environment variables:
 export OLLAMA_MODEL=llama3
 export OLLAMA_MODEL_PLANNING=llama3:8b
 export OLLAMA_MODEL_EXECUTION=codellama:7b
-export OLLAMA_MODEL_REVIEW=mistral:7b
-export OLLAMA_SUMMARIZATION_MODEL=llama3
+export OLLAMA_MODEL_ANALYSIS=llama3
 ```
 
 ## Example Configurations
@@ -57,7 +53,7 @@ export OLLAMA_SUMMARIZATION_MODEL=llama3
 For quick analysis where you want a balance of performance and accuracy:
 
 ```bash
-python -m src.bridge --model llama3:7b --planning-model llama3 --execution-model llama3:7b --review-model llama3
+python -m src.bridge --model llama3:7b --planning-model llama3 --execution-model llama3:7b
 ```
 
 ### Deep Analysis Configuration
@@ -65,7 +61,7 @@ python -m src.bridge --model llama3:7b --planning-model llama3 --execution-model
 For deeper analysis where you want maximum reasoning capabilities:
 
 ```bash
-python -m src.bridge --model llama3 --planning-model llama3 --execution-model llama3 --review-model llama3 --verification-model llama3
+python -m src.bridge --model llama3 --planning-model llama3 --execution-model llama3 --analysis-model llama3:34b
 ```
 
 ### Mixed Capability Configuration
@@ -73,7 +69,7 @@ python -m src.bridge --model llama3 --planning-model llama3 --execution-model ll
 Using specialized models for different phases:
 
 ```bash
-python -m src.bridge --model llama3:7b --planning-model llama3 --execution-model codellama:7b --review-model mistral --verification-model llama3
+python -m src.bridge --model llama3:7b --planning-model llama3 --execution-model codellama:7b --analysis-model codellama:34b
 ```
 
 ## System Prompts for Different Phases
@@ -82,7 +78,8 @@ You can also customize the system prompts for different phases using environment
 
 ```bash
 export OLLAMA_SYSTEM_PROMPT_PLANNING="You are a planning assistant focused on creating detailed analysis plans..."
-export OLLAMA_SYSTEM_PROMPT_EXECUTION="You are a reverse engineering assistant specialized in analyzing binary code..."
+export OLLAMA_SYSTEM_PROMPT_EXECUTION="You are a reverse engineering assistant specialized in executing Ghidra commands..."
+export OLLAMA_SYSTEM_PROMPT_ANALYSIS="You are an analysis assistant focused on explaining reverse engineering results..."
 ```
 
 ## Performance Considerations
@@ -90,7 +87,7 @@ export OLLAMA_SYSTEM_PROMPT_EXECUTION="You are a reverse engineering assistant s
 1. Using different models may increase latency due to model switching
 2. Larger models typically provide better reasoning but are slower
 3. For time-sensitive tasks, consider using smaller models for all phases
-4. The planning and review phases generally benefit most from larger models
+4. The planning and analysis phases generally benefit most from larger models
 
 ## Troubleshooting
 

@@ -4,88 +4,215 @@ Configuration module for the Ollama-GhidraMCP Bridge.
 
 import os
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 @dataclass
 class OllamaConfig:
     """Configuration for the Ollama client."""
     base_url: str = "http://localhost:11434"
-    model: str = "llama3"
-    summarization_model: str = ""  # Empty string means use the main model
+    model: str = "llama3.1"  # Updated to llama3.1 which supports tool calling
     timeout: int = 120  # Timeout for requests in seconds
     
-    # NEW: Model map for different phases of the agentic loop
+    # Model map for different phases of the simplified agentic loop
     # If a phase is not in the map or the value is empty, the default model will be used
     model_map: Dict[str, str] = field(default_factory=lambda: {
         "planning": "",       # Model for planning phase 
-        "execution": "",      # Model for execution phase
-        "review": "",         # Model for review phase
-        "summarization": "",  # Model for context summarization (if not specified, use summarization_model)
-        "verification": "",   # Model for verification phase
-        "learning": ""        # Model for learning phase
+        "execution": "",      # Model for tool execution phase
+        "analysis": ""        # Model for final analysis phase
     })
     
-    # System prompt for guiding the AI's responses
+    # Simplified system prompt
     default_system_prompt: str = """
     You are an AI assistant specialized in reverse engineering with Ghidra.
     You can help analyze binary files by executing commands through GhidraMCP.
-    
-    Available commands:
-    - list_methods(offset, limit): List all function names with pagination
-    - list_classes(offset, limit): List all namespace/class names with pagination
-    - decompile_function(name): Decompile a specific function by name
-    - rename_function(old_name, new_name): Rename a function
-    - rename_data(address, new_name): Rename a data label at an address
-    - list_segments(offset, limit): List memory segments with pagination
-    - list_imports(offset, limit): List imported symbols with pagination
-    - list_exports(offset, limit): List exported symbols with pagination
-    - list_namespaces(offset, limit): List all non-global namespaces with pagination
-    - list_data_items(offset, limit): List defined data labels with pagination
-    - search_functions_by_name(query, offset, limit): Search functions by name
-    - rename_variable(function_name, old_name, new_name): Rename a local variable
-    - get_function_by_address(address): Get function by address
-    - get_current_address(): Get currently selected address
-    - get_current_function(): Get currently selected function
-    - list_functions(): List all functions in the database
-    - decompile_function_by_address(address): Decompile function at address
-    - disassemble_function(address): Get assembly code for a function
-    - set_decompiler_comment(address, comment): Set a comment in pseudocode
-    - set_disassembly_comment(address, comment): Set a comment in disassembly
-    - rename_function_by_address(function_address, new_name): Rename function by address
-    - set_function_prototype(function_address, prototype): Set a function's prototype
-    - set_local_variable_type(function_address, variable_name, new_type): Set variable type
-    
-    When responding, if you need to perform an action in Ghidra, use the format:
-    EXECUTE: command_name(param1="value1", param2="value2")
-    
-    For example:
-    EXECUTE: decompile_function(name="main")
-    EXECUTE: list_functions()
-    EXECUTE: disassemble_function(address="0x1000")
     """
     
-    # System prompt specifically for summarization tasks
-    summarization_system_prompt: str = """
-    You are a specialized AI assistant for summarizing and organizing technical information about reverse engineering and binary analysis. 
-    Your task is to create a comprehensive, well-structured report based on the information provided.
+    # Define tools for Ollama's tool calling API
+    tools: List[Dict[str, Any]] = field(default_factory=lambda: [
+        {
+            "type": "function",
+            "function": {
+                "name": "list_methods",
+                "description": "List all function names with pagination",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "offset": {"type": "integer", "description": "Offset to start from"},
+                        "limit": {"type": "integer", "description": "Maximum number of results"}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_classes",
+                "description": "List all namespace/class names with pagination",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "offset": {"type": "integer", "description": "Offset to start from"},
+                        "limit": {"type": "integer", "description": "Maximum number of results"}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "decompile_function",
+                "description": "Decompile a specific function by name",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Function name"}
+                    },
+                    "required": ["name"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "rename_function",
+                "description": "Rename a function",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "old_name": {"type": "string", "description": "Current function name"},
+                        "new_name": {"type": "string", "description": "New function name"}
+                    },
+                    "required": ["old_name", "new_name"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "rename_function_by_address",
+                "description": "Rename function by address (IMPORTANT: Use numerical addresses only, not function names)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "function_address": {"type": "string", "description": "Function address (numerical only, like '1800011a8')"},
+                        "new_name": {"type": "string", "description": "New function name"}
+                    },
+                    "required": ["function_address", "new_name"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_functions",
+                "description": "List all functions in the database",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "decompile_function_by_address",
+                "description": "Decompile function at address",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "address": {"type": "string", "description": "Function address"}
+                    },
+                    "required": ["address"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_imports",
+                "description": "List imported symbols in the program",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "offset": {"type": "integer", "description": "Offset to start from"},
+                        "limit": {"type": "integer", "description": "Maximum number of results"}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_exports", 
+                "description": "List exported functions/symbols in the program",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "offset": {"type": "integer", "description": "Offset to start from"},
+                        "limit": {"type": "integer", "description": "Maximum number of results"}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_segments",
+                "description": "List all memory segments in the program",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "offset": {"type": "integer", "description": "Offset to start from"},
+                        "limit": {"type": "integer", "description": "Maximum number of results"}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_functions_by_name",
+                "description": "Search for functions by name substring",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query string"},
+                        "offset": {"type": "integer", "description": "Offset to start from"},
+                        "limit": {"type": "integer", "description": "Maximum number of results"}
+                    },
+                    "required": ["query"]
+                }
+            }
+        }
+    ])
     
-    Focus on:
-    1. Extracting key insights and findings
-    2. Organizing information logically
-    3. Highlighting important technical details about functions, memory, and program behavior
-    4. Summarizing the overall purpose and behavior of the analyzed binary
-    5. Providing clear conclusions
-    
-    Format your response as a structured report with clearly delineated sections using Markdown.
+    # System prompt for each phase
+    planning_system_prompt: str = """
+    You are a planning assistant specialized in reverse engineering with Ghidra.
+    Your task is to create a clear plan for analyzing binary files based on the user's request.
+    Focus on understanding what the user is asking for and outlining the necessary steps.
+    Do not execute any commands yet, just create a detailed plan.
     """
     
-    # NEW: System prompts for different phases
+    execution_system_prompt: str = """
+    You are a tool execution assistant specialized in reverse engineering with Ghidra.
+    Your task is to execute the necessary Ghidra commands to fulfill the user's request.
+    Use the EXECUTE: command_name(param1=value1, param2=value2) format to call commands.
+    Focus on retrieving the information needed, not on analysis yet.
+    """
+    
+    analysis_system_prompt: str = """
+    You are an analysis assistant specialized in reverse engineering with Ghidra.
+    Your task is to analyze the results of the tool executions and provide a comprehensive
+    answer to the user's query. Focus on clear explanations and actionable insights.
+    Prefix your final answer with "FINAL RESPONSE:" to mark the conclusion of your analysis.
+    """
+    
+    # System prompts for different phases
     phase_system_prompts: Dict[str, str] = field(default_factory=lambda: {
-        "planning": "",  # If empty, use default_system_prompt
-        "execution": "",
-        "review": "",
-        "verification": "",
-        "learning": ""
+        "planning": "",  # If empty, use planning_system_prompt
+        "execution": "", # If empty, use execution_system_prompt
+        "analysis": ""   # If empty, use analysis_system_prompt
     })
 
 @dataclass
@@ -118,14 +245,13 @@ class BridgeConfig:
         # Create base Ollama config with core settings
         ollama_config = OllamaConfig(
             base_url=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
-            model=os.environ.get("OLLAMA_MODEL", "llama3"),
-            summarization_model=os.environ.get("OLLAMA_SUMMARIZATION_MODEL", ""),
+            model=os.environ.get("OLLAMA_MODEL", "llama3.1"),
             timeout=int(os.environ.get("OLLAMA_TIMEOUT", "120")),
         )
         
         # Set up model map from environment variables
         model_map = {}
-        for phase in ["planning", "execution", "review", "summarization", "verification", "learning"]:
+        for phase in ["planning", "execution", "analysis"]:
             env_var = f"OLLAMA_MODEL_{phase.upper()}"
             if env_var in os.environ:
                 model_map[phase] = os.environ[env_var]
@@ -136,7 +262,7 @@ class BridgeConfig:
             
         # Set up system prompts for different phases from environment variables
         phase_prompts = {}
-        for phase in ["planning", "execution", "review", "verification", "learning"]:
+        for phase in ["planning", "execution", "analysis"]:
             env_var = f"OLLAMA_SYSTEM_PROMPT_{phase.upper()}"
             if env_var in os.environ:
                 phase_prompts[phase] = os.environ[env_var]
