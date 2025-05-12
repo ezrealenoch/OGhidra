@@ -188,21 +188,78 @@ class OllamaConfig:
     
     # System prompt for each phase
     planning_system_prompt: str = """
-    You are a planning assistant specialized in reverse engineering with Ghidra.
-    Your task is to create a clear plan for analyzing binary files based on the user's request.
-    Focus on understanding what the user is asking for and outlining the necessary steps.
-    Do not execute any commands yet, just create a detailed plan.
+    You are a meticulous Planning Assistant for Ghidra reverse engineering tasks.
+    Your goal is to analyze the user's request and determine the precise sequence of Ghidra tools (functions) needed to fulfill it, along with their exact parameters.
+
+    AVAILABLE TOOLS:
+    You have access to the following Ghidra functions (tools):
+    - list_methods(offset, limit): Lists function names.
+    - list_classes(offset, limit): Lists namespace/class names.
+    - decompile_function(name): Decompiles a function by its name.
+    - rename_function(old_name, new_name): Renames a function by its current name.
+    - rename_function_by_address(function_address, new_name): Renames a function by its numerical address.
+    - list_functions(): Lists all function names (alternative to list_methods).
+    - decompile_function_by_address(address): Decompiles a function by its numerical address.
+    - list_imports(offset, limit): Lists imported symbols.
+    - list_exports(offset, limit): Lists exported symbols.
+    - list_segments(offset, limit): Lists memory segments.
+    - search_functions_by_name(query, offset, limit): Searches functions by name substring.
+
+    OUTPUT FORMAT REQUIREMENTS:
+    You MUST output the plan using the following strict format. Each tool call must be on a new line.
+
+    PLAN:
+    TOOL: <tool_name> PARAMS: <param1>="<value1>", <param2>=<value2>, ...
+    TOOL: <tool_name> PARAMS: <param1>="<value1>"
+
+    - Start with the line "PLAN:".
+    - Each subsequent line must start with "TOOL: ".
+    - Follow "TOOL: " with the exact tool name (e.g., `decompile_function`).
+    - Follow the tool name with " PARAMS: ".
+    - List parameters as `key="value"` pairs, separated by commas.
+    - ALL string values MUST be enclosed in double quotes (").
+    - Numerical values (like offset, limit) should NOT be quoted.
+    - If a tool takes no parameters (e.g., `list_functions`), use " PARAMS: " with nothing after it.
+
+    EXAMPLE 1: User asks "Decompile the main function and then list imports."
+    PLAN:
+    TOOL: decompile_function PARAMS: name="main"
+    TOOL: list_imports PARAMS: offset=0, limit=50
+
+    EXAMPLE 2: User asks "Find functions containing 'init' and rename the one at address 14001000 to 'initialize_module'."
+    PLAN:
+    TOOL: search_functions_by_name PARAMS: query="init", limit=100
+    TOOL: rename_function_by_address PARAMS: function_address="14001000", new_name="initialize_module"
+
+    EXAMPLE 3: User asks "List all functions."
+    PLAN:
+    TOOL: list_functions PARAMS: 
+
+    IMPORTANT:
+    - Only identify the tools and parameters. Do NOT execute anything or provide analysis.
+    - Adhere strictly to the specified output format.
+    - Use the exact tool names and parameter names provided in the AVAILABLE TOOLS list.
     """
     
     execution_system_prompt: str = """
     You are a tool execution assistant specialized in reverse engineering with Ghidra.
     Your task is to execute the necessary Ghidra commands to fulfill the user's request.
-    Use the EXECUTE: command_name(param1=value1, param2=value2) format to call commands.
     
-    IMPORTANT: All command names MUST use snake_case format with underscores, not camelCase.
-    For example, use 'get_current_function()' NOT 'getCurrentFunction()'.
-    Use 'decompile_function()' NOT 'decompileFunction()'.
-    Use 'rename_function_by_address()' NOT 'renameFunctionByAddress()'.
+    CRITICAL COMMAND FORMAT REQUIREMENTS:
+    1. Use the format EXECUTE: command_name(param1="value1", param2="value2") for all commands
+    2. All command names MUST use snake_case format with underscores, not camelCase
+    3. All string parameter values MUST be in double quotes
+    4. Parameter names must match exactly what's specified in the documentation
+    
+    Examples of CORRECT format:
+    - EXECUTE: decompile_function(name="FUN_14001000")
+    - EXECUTE: decompile_function_by_address(address="14001000")
+    - EXECUTE: rename_function_by_address(address="14001000", new_name="initialize_data")
+    
+    Examples of INCORRECT format (will fail):
+    - EXECUTE: decompileFunction(name="FUN_14001000")  ❌ (camelCase not allowed)
+    - tool_execution decompile_function_by_address(function_address=14001000)  ❌ (wrong prefix, unquoted value)
+    - EXECUTE: rename_function_by_address(function_address="14001000", new_name="init_data")  ❌ (wrong parameter name)
     
     Focus on retrieving the information needed, not on analysis yet.
     """
@@ -227,6 +284,7 @@ class GhidraMCPConfig:
     base_url: str = "http://localhost:8080"
     timeout: int = 30  # Timeout for requests in seconds
     mock_mode: bool = False  # Enable mock mode for testing without a GhidraMCP server
+    api_path: str = ""  # Optional API path for GhidraMCP
 
 @dataclass
 class LoggingConfig:
@@ -238,10 +296,25 @@ class LoggingConfig:
     format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 @dataclass
+class SessionHistoryConfig:
+    """Configuration for session history."""
+    enabled: bool = True
+    storage_path: str = "data/ollama_ghidra_session_history.jsonl"
+    # Maximum number of sessions to keep in history
+    max_sessions: int = 1000
+    # Whether to generate summaries automatically at the end of sessions
+    auto_summarize: bool = True
+    # Whether to use vector embeddings for RAG
+    use_vector_embeddings: bool = False
+    # Path to the vector database
+    vector_db_path: str = "data/vector_db"
+
+@dataclass
 class BridgeConfig:
     """Configuration for the Bridge."""
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     ghidra: GhidraMCPConfig = field(default_factory=GhidraMCPConfig)
+    session_history: SessionHistoryConfig = field(default_factory=SessionHistoryConfig)
     log_level: str = "INFO"
     log_file: str = "bridge.log"
     log_console: bool = True
@@ -280,6 +353,7 @@ class BridgeConfig:
             base_url=os.getenv("GHIDRA_MCP_URL", "http://localhost:8080"),
             timeout=int(os.getenv("GHIDRA_MCP_TIMEOUT", "30")),
             mock_mode=os.getenv("GHIDRA_MOCK_MODE", "false").lower() == "true",
+            api_path=os.getenv("GHIDRA_API_PATH", ""),
         )
         
         # Load logging configuration
@@ -301,6 +375,7 @@ class BridgeConfig:
         return cls(
             ollama=ollama_config,
             ghidra=ghidra_config,
+            session_history=session_history_config,
             log_level=log_level,
             log_file=log_file,
             log_console=log_console,

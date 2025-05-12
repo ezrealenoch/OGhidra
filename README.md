@@ -1,247 +1,153 @@
-# Ollama-GhidraMCP Bridge
+# OGhidra - Ollama-GhidraMCP Bridge
 
-A Python application that bridges locally hosted AI models (via Ollama) with GhidraMCP for AI-assisted reverse engineering tasks within Ghidra.
-(Working with multiple models including llama3, codellama, and now Gemma. Default is currently gemma3:27b)
-![Screenshot 2025-04-14 155639](https://github.com/user-attachments/assets/f8fb0fb1-6a9c-4097-8e3e-00d87d2d96f4)
+OGhidra bridges the gap between Large Language Models (LLMs) running via Ollama and the Ghidra reverse engineering platform through the GhidraMCP API. It enables using natural language to interact with Ghidra for binary analysis tasks.
 
+## Key Features
 
-## Architecture
+*   **Dual API Server Architecture**: Uses the original GhidraMCP server and an extended Flask-based server for comprehensive API coverage.
+*   **Multi-Phase AI Processing**: Employs a Planning-Execution-Analysis workflow for structured interaction.
+*   **Flexible Model Configuration**: Allows using different Ollama models for each processing phase.
+*   **Command Normalization**: Improves compatibility with various LLMs by correcting command formats.
+*   **Session Memory & Caching**: Features session history, Retrieval-Augmented Generation (RAG), and Cache-Augmented Generation (CAG) for contextual awareness and knowledge persistence.
+*   **Interactive & Scriptable**: Can be used interactively or integrated into scripts.
 
-This bridge connects the following components:
+## Architecture Overview
 
-- **Ollama Server**: Hosts local AI models (e.g., LLaMA 3, Mistral, Gemma) accessible via REST API
-- **Bridge Application**: This Python application that serves as an intermediary
-- **GhidraMCP Server**: Exposes Ghidra's functionalities via MCP
+OGhidra uses a streamlined three-phase approach:
 
-## Features
+1.  **Planning Phase**: An LLM analyzes the user's query and generates a structured plan using Ghidra tools.
+2.  **Tool Calling Phase (Execution)**: The plan is deterministically parsed, and the corresponding GhidraMCP client methods are called to interact with the Ghidra instance(s). This phase uses a Python function (`_parse_and_execute_plan` in `src/bridge.py`) instead of an LLM.
+3.  **Analysis Phase**: An LLM analyzes the results gathered from Ghidra and provides a comprehensive response.
 
-- **Natural Language Queries**: Translate user queries into GhidraMCP commands
-- **Context Management**: Maintains conversation context for multi-step analyses
-- **Interactive Mode**: Command-line interface for interactive sessions
-- **Health Checks**: Verify connectivity to Ollama and GhidraMCP services
-- **Model Switching**: Use different models for different phases of the agentic loop
-- **Agentic Capabilities**: Multi-step reasoning with planning, execution, and analysis phases
-- **Terminal Output**: View tool calls and results directly in the terminal
-- **Command Normalization**: Automatically convert camelCase to snake_case for non-tool-calling models
-- **Enhanced Error Messages**: Clear feedback for incorrect command formats
+### Dual API Servers
 
-## Requirements
+*   **Original GhidraMCP Server**: Typically runs on `http://localhost:8080`. Provides core Ghidra functions.
+*   **Extended API Server**: A Flask server (`src/ghidra_mcp_server.py`) running on `http://localhost:8081` (default). Implements functions defined in `ghidra_knowledge_cache/function_signatures.json`.
+*   **Client Fallback**: The `GhidraMCPClient` (`src/ghidra_mcp_client.py`) attempts calls to the original server first and falls back to the extended server if needed.
 
-- Python 3.8+
-- Ollama server running locally or remotely
-- GhidraMCP server running within Ghidra
+### Key Implementation Classes
 
-## Pre-installation
-- Follow the installation steps from Laurie's project (https://github.com/LaurieWired/GhidraMCP)
-   - Install the GhidraPlugin and enable developer mode
+*   `Bridge`: Main class coordinating the multi-phase processing (`src/bridge.py`).
+*   `OllamaClient`: Handles communication with the Ollama API (`src/ollama_client.py`).
+*   `GhidraMCPClient`: Communicates with the GhidraMCP servers (`src/ghidra_mcp_client.py`).
+*   `BridgeConfig`: Centralizes configuration management (`src/config.py`).
+*   `MemoryManager`: Manages session history and RAG (`src/memory_manager.py`).
+*   `CAGManager`: Manages Cache-Augmented Generation (`src/cag/manager.py`).
 
-## Installation
+## Setup and Installation
 
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/ezrealenoch/ollama-ghidra-bridge.git
-   cd ollama-ghidra-bridge
-   ```
+1.  **Clone the repository:**
+    ```bash
+    git clone <repository-url>
+    cd OGhidra-main
+    ```
+2.  **Set up Ghidra and GhidraMCP**: Follow the instructions for Ghidra and the GhidraMCP plugin to have the original server running (usually on port 8080).
+3.  **Create a Python virtual environment (optional but recommended):**
+    ```bash
+    python -m venv venv
+    source venv/bin/activate  # Linux/macOS
+    .\venv\Scripts\activate    # Windows
+    ```
+4.  **Install dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+5.  **Configure environment variables:**
+    *   Copy `.envexample` to `.env`.
+    *   Edit `.env` to set your Ollama endpoint (`OLLAMA_API_URL`), default model (`OLLAMA_MODEL`), and GhidraMCP server URLs (`GHIDRA_MCP_URL`, `GHIDRA_MCP_EXTENDED_URL`).
+    *   Configure phase-specific models, memory, and CAG settings as needed (see below).
 
-2. Install the required dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+## Running OGhidra
 
-3. Create a `.env` file by copying the example:
-   ```bash
-   cp .env.example .env
-   ```
-
-4. Edit the `.env` file to configure your Ollama and GhidraMCP settings.
-
-## Usage
-
-### Interactive Mode
-
-Run the bridge in interactive mode:
-
-```bash
-python main.py --interactive
-```
-
-Special commands:
-- Type `exit` or `quit` to exit
-- Type `health` to check connectivity to Ollama and GhidraMCP
-- Type `models` to list available Ollama models
-
-### Model Switching for Agentic Loop
-
-You can now use different models for different phases of the agentic reasoning loop. This allows you to optimize the use of models based on their strengths:
+### 1. Start the Extended API Server
 
 ```bash
-python main.py --interactive --model llama3 --planning-model llama3 --execution-model codellama:7b
+python src/ghidra_mcp_server.py
 ```
+This will start the Flask server, typically on `http://localhost:8081`.
 
-The bridge now also supports **Gemma models**:
+### 2. Run the Bridge
+
+**Interactive Mode:**
 
 ```bash
-python main.py --interactive --model gemma3:27b
+python src/main.py --interactive
 ```
 
-Available phase-specific models:
-- `--planning-model`: Model for the planning phase (creating analysis plans)
-- `--execution-model`: Model for the execution phase (running tools)
-- `--analysis-model`: Model for the analysis phase (evaluating results)
-
-You can also configure these via environment variables:
-```
-OLLAMA_MODEL_PLANNING=llama3
-OLLAMA_MODEL_EXECUTION=codellama:7b
-OLLAMA_MODEL_ANALYSIS=llama3:34b
-```
-
-For more detailed information about model switching, see [README-MODEL-SWITCHING.md](README-MODEL-SWITCHING.md).
-
-### Non-Tool-Calling Models
-
-For models like Gemma that don't support the Ollama tool-calling API, the bridge includes automatic corrections for common issues:
-
-1. **Command normalization**: Automatically converts camelCase to snake_case
-   - Example: `getCurrentFunction()` → `get_current_function()`
-   - Example: `decompileFunction()` → `decompile_function()`
-
-2. **Parameter name standardization**: Fixes commonly misnamed parameters
-   - Example: `function_address` → `address` in decompile and rename functions
-   - Example: `functionAddress` → `address` (combines camelCase and parameter name fixes)
-
-3. **Format detection**: Recognizes various incorrect formats and converts them to the expected format
-   - Example: `tool_execution decompile_function_by_address(function_address=140251140)` is detected and processed
-
-4. **Address format standardization**: Handles various address formats
-   - Example: Removes `FUN_` prefix: `FUN_140001000` → `140001000`
-   - Example: Removes `0x` prefix: `0x140001000` → `140001000`
-
-5. **Enhanced error messages**: Provides clear guidance when errors occur
-6. **Terminal output**: Shows command execution output directly in the terminal
-
-For detailed information about command normalization, see [README-COMMAND-NORMALIZATION.md](README-COMMAND-NORMALIZATION.md).
-
-### Proper Command Format
-
-The correct format for commands is:
-```
-EXECUTE: command_name(param1="value1", param2="value2")
-```
-
-Common incorrect formats that are automatically detected:
-```
-tool_execution command_name(param1=value1)
-```
-```json
-{"tool": "command_name", "parameters": {"param1": "value1"}}
-```
-```
-EXECUTE: commandName(param1="value1")  # camelCase instead of snake_case
-```
-```
-EXECUTE: command_name(wrong_param_name="value1")  # Incorrect parameter name
-```
-
-### Mock Mode
-
-If you don't have a GhidraMCP server running or want to test the bridge functionality, you can use mock mode:
+**Single Query:**
 
 ```bash
-python main.py --interactive --mock
+python src/main.py "Your analysis query here"
 ```
 
-In mock mode, the bridge simulates GhidraMCP responses without contacting the actual server.
+## Configuration Details
 
-### Command Line Mode
+Configuration is primarily managed via the `.env` file and command-line arguments.
 
-Process a single query:
+### Models and Phases
 
-```bash
-echo "What functions are in this binary?" | python main.py
-```
+*   Set the default model: `OLLAMA_MODEL=llama3`
+*   Set phase-specific models (optional):
+    *   `OLLAMA_MODEL_PLANNING=gemma3:27b`
+    *   `OLLAMA_MODEL_ANALYSIS=gemma3:27b`
+    *   (Note: The Execution phase uses deterministic Python code, not an LLM).
+*   Use `--list-models` to see available Ollama models.
+*   Phase-specific system prompts can also be set (e.g., `OLLAMA_SYSTEM_PROMPT_PLANNING`).
 
-### Configuration Options
+See `README-MODELS.md` and `README-MODEL-SWITCHING.md` (now incorporated here) for more details on model selection recommendations.
 
-You can configure the bridge through:
+### Command Normalization
 
-1. Environment variables (see `.env.example`)
-2. Command line arguments:
-   ```bash
-   python main.py --ollama-url http://localhost:11434 --ghidra-url http://localhost:8080 --model gemma3:27b --interactive
-   ```
+The system automatically normalizes command names (e.g., `decompileFunction` -> `decompile_function`) and parameters to improve compatibility with LLMs that don't strictly follow the required format. Normalizations are logged to the console.
 
-## Troubleshooting
+See `README-COMMAND-NORMALIZATION.md` (now incorporated here) for details.
 
-### GhidraMCP Connection Issues
+### Session Memory (History & RAG)
 
-If you encounter 404 errors or empty responses from the GhidraMCP server:
+*   **Enable/Disable**: `SESSION_HISTORY_ENABLED=true` / `false`
+*   **Storage Path**: `SESSION_HISTORY_PATH="data/ollama_ghidra_session_history.jsonl"`
+*   **Max Sessions**: `SESSION_HISTORY_MAX_SESSIONS=1000`
+*   **Vector Embeddings (RAG)**:
+    *   `SESSION_HISTORY_USE_VECTOR_EMBEDDINGS=true` / `false`
+    *   `SESSION_HISTORY_VECTOR_DB_PATH="data/vector_db"`
+*   **Command Line:**
+    *   `python src/main.py --check-memory`
+    *   `python src/main.py --memory-stats`
+    *   `python src/main.py --clear-memory`
+    *   `python src/main.py --enable-vector-embeddings` / `--disable-vector-embeddings`
+*   **Interactive Commands**: `memory-health`, `memory-stats`, `memory-clear`, `memory-vectors-on`, `memory-vectors-off`
 
-1. **Verify GhidraMCP server is running**: Make sure the GhidraMCP server is running and accessible. You can test with `curl http://localhost:8080/methods`
+See `src/README_MEMORY.md` (now incorporated here) for implementation details.
 
-2. **Check endpoint structure**: This bridge directly implements the same endpoint structure as the [GhidraMCP repository](https://github.com/LaurieWired/GhidraMCP/blob/main/bridge_mcp_ghidra.py).
+### Cache-Augmented Generation (CAG)
 
-3. **Try mock mode**: Use the `--mock` flag to verify the bridge functionality without connecting to a real server.
+CAG provides persistent, cached knowledge (Ghidra commands, workflows) and session context (decompiled functions, renames) without real-time retrieval.
 
-4. **Check server URL**: Ensure the server URL in your configuration is correct, including the port.
+*   **Enable/Disable**: `CAG_ENABLED=true` / `false`
+*   **Knowledge Cache**: `CAG_KNOWLEDGE_CACHE_ENABLED=true` / `false`
+*   **Session Cache**: `CAG_SESSION_CACHE_ENABLED=true` / `false`
+*   **Token Limit**: `CAG_TOKEN_LIMIT=2000`
+*   **Command Line**: `python src/main.py --disable-cag`
+*   **Interactive Command**: `cag` (shows status)
 
-### Command Format Issues
+Knowledge Base Files:
+*   `ghidra_knowledge_cache/function_signatures.json`
+*   `ghidra_knowledge_cache/common_workflows.json` (if exists)
+*   `ghidra_knowledge_cache/binary_patterns.json` (if exists)
+*   `ghidra_knowledge_cache/analysis_rules.json` (if exists)
 
-If your model is having trouble with command formats:
+See `README-CAG.md` (now incorporated here) for more details.
 
-1. **Use the correct format**: `EXECUTE: command_name(param1="value1", param2="value2")`
-2. **Use quotes for strings**: Always use `param="value"` not `param=value` for string parameters
-3. **Use snake_case**: All commands use `snake_case_format` not `camelCaseFormat`
-4. **Check the terminal**: Command normalization logs are displayed in the terminal
-5. **Common mistakes**:
-   - Using `tool_execution` instead of `EXECUTE:`
-   - Using `function_address` instead of `address` parameter
-   - Missing quotes around string values
-   - Using camelCase for command names
+## Testing
 
-### Ollama API Issues
+*   **Extended API Server Tests**: `python -m unittest src/test_extended_api.py` (Ensure the extended server is running).
+*   **Bridge/Normalization Tests**: Check `tests/` directory (e.g., `test_command_normalization.py`, `test_bridge.py`). Run relevant tests using `unittest`.
+*   **Memory Sample Data**: `python src/generate_sample_data.py` (See memory docs for options).
 
-If you encounter issues with the Ollama API:
+## Contributing
 
-1. Ensure Ollama is running: `curl http://localhost:11434`
-2. Verify the model specified exists: `ollama list`
-3. Check the model compatibility with the prompt format
-
-### JSON Parsing Errors
-
-If you see "Expecting value" or other JSON parsing errors:
-
-1. The API might be returning empty or non-JSON responses
-2. Try running with `LOG_LEVEL=DEBUG` for more detailed logs
-3. Check the API documentation to ensure proper request format
-
-## Available GhidraMCP Commands
-
-The bridge supports the following commands:
-
-- `decompile_function(name="function_name")`: Decompile a function by name
-- `decompile_function_by_address(address="0x1000")`: Decompile a function at a given address
-- `rename_function(old_name="FUN_1000", new_name="initialize_data")`: Rename a function
-- `rename_function_by_address(address="0x1000", new_name="initialize_data")`: Rename a function by address
-- `list_functions()`: Retrieve a list of all functions in the binary
-- `search_functions_by_name(query="init")`: Search for functions by substring
-- `list_imports()`: List all imported functions
-- `list_exports()`: List all exported functions
-- `list_segments()`: Retrieve the memory layout of the binary
-
-## Example Queries
-
-- "List all functions in this binary"
-- "Decompile the function at address 0x1000"
-- "What's the memory layout of this binary?"
-- "Find all strings containing 'password'"
-- "Rename the function at 0x2000 to 'process_data'"
+Please refer to the project's contribution guidelines (if available).
 
 ## License
 
-[MIT License](LICENSE)
-
-## Acknowledgements
-
-- [LaurieWired/GhidraMCP](https://github.com/LaurieWired/GhidraMCP) - GhidraMCP server
-- [Ollama](https://ollama.ai/) - Local large language model hosting 
+Specify project license here.

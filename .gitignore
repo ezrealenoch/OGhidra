@@ -28,4 +28,11 @@ ENV/
 
 # OS specific files
 .DS_Store
-Thumbs.db 
+Thumbs.db
+
+# Session and cache data
+data/
+ghidra_session_cache/
+ghidra_knowledge_cache/
+vector_db/
+*.jsonl 
