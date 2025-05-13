@@ -12,6 +12,7 @@ import logging
 import sys
 import os
 import re  # Added for pattern matching in enhanced error feedback
+import time
 from typing import Dict, Any, List, Optional, Tuple, Union
 
 from src.config import BridgeConfig
@@ -19,6 +20,7 @@ from src.ollama_client import OllamaClient
 from src.ghidra_client import GhidraMCPClient
 from src.command_parser import CommandParser
 from src.cag.manager import CAGManager
+from src import config
 
 # Configure logging
 def setup_logging(config):
@@ -56,8 +58,11 @@ class Bridge:
         self.config = config
         self.logger = setup_logging(config)
         self.ollama = OllamaClient(config.ollama)
-        self.ghidra = GhidraMCPClient(config.ghidra)
-        self.context = []  # Store conversation context
+        self.ghidra_client = GhidraMCPClient(config.ghidra)
+        
+        # Initialize context as a list for conversation history
+        self.context = []
+        
         self.include_capabilities = include_capabilities
         self.capabilities_text = self._load_capabilities_text()
         self.logger.info(f"Bridge initialized with Ollama at {config.ollama.base_url} and GhidraMCP at {config.ghidra.base_url}")
@@ -65,7 +70,7 @@ class Bridge:
         
         # Initialize CAG Manager
         self.enable_cag = enable_cag
-        self.cag_manager = CAGManager() if enable_cag else None
+        self.cag_manager = CAGManager(config) if enable_cag else None
         if self.enable_cag:
             self.logger.info("Cache-Augmented Generation (CAG) enabled")
         
@@ -90,10 +95,25 @@ class Bridge:
             'pending_critical': []  # List of critical planned tools that haven't been executed yet
         }
         
+        # Current goal tracking
+        self.current_goal = None
+        self.goal_achieved = False
+        self.goal_steps_taken = 0
+        self.max_goal_steps = config.max_steps
+        
         if self.include_capabilities and self.capabilities_text:
             self.logger.info("Capabilities context will be included in prompts.")
         elif self.include_capabilities:
             self.logger.warning("`--include-capabilities` flag set, but `ai_ghidra_capabilities.txt` not found or empty.")
+        
+        # Set up command parser
+        self.command_parser = CommandParser()
+        
+        # Configure the bridge
+        self.max_steps = getattr(config, 'MAX_STEPS', 5)
+        self.max_goal_steps = getattr(config, 'MAX_GOAL_STEPS', 5)
+        self.max_review_steps = getattr(config, 'MAX_REVIEW_STEPS', 5)
+        self.enable_review = getattr(config, 'ENABLE_REVIEW', True)
     
     def _load_capabilities_text(self) -> Optional[str]:
         """Load the capabilities text from the file if the flag is set."""
@@ -130,8 +150,15 @@ class Bridge:
         Returns:
             A structured prompt string with labeled sections
         """
-        # Capabilities section
+        # Initialize all sections with empty strings
         capabilities_section = ""
+        state_section = ""
+        plan_section = ""
+        cag_section = ""
+        history_section = ""
+        instructions_section = ""
+        
+        # Capabilities section
         if self.include_capabilities and self.capabilities_text:
             capabilities_section = (
                 f"## Available Tools:\n"
@@ -141,7 +168,6 @@ class Bridge:
             )
         
         # State information section - what the agent has already done
-        state_section = ""
         if any(len(v) > 0 for v in self.analysis_state.values() if isinstance(v, (dict, set))):
             state_section = "## Analysis State:\n"
             if self.analysis_state['functions_decompiled']:
@@ -156,13 +182,20 @@ class Bridge:
             state_section += "---\n\n"
             
         # Current plan section
-        plan_section = ""
         if self.current_plan:
             plan_section = f"## Current Plan:\n{self.current_plan}\n---\n\n"
             
         # Conversation history section
         history_items = []
-        for item in self.context[-self.config.context_limit:]:
+        
+        # Get context history, handling both list and dict formats
+        context_history = []
+        if isinstance(self.context, list):
+            context_history = self.context[-self.config.context_limit:]
+        elif isinstance(self.context, dict) and 'history' in self.context:
+            context_history = self.context['history'][-self.config.context_limit:]
+        
+        for item in context_history:
             prefix = "User: " if item["role"] == "user" else \
                     "Assistant: " if item["role"] == "assistant" else \
                     "Tool Call: " if item["role"] == "tool_call" else \
@@ -175,22 +208,33 @@ class Bridge:
         history_section = "## Conversation History:\n" + "\n".join(history_items) + "\n---\n\n"
         
         # CAG section - enhanced context from knowledge and session caches
-        cag_section = ""
-        if self.enable_cag and self.cag_manager and self.context and self.context[-1]["role"] == "user":
-            # Update session cache with latest context
-            self.cag_manager.update_session_from_bridge_context(self.context)
+        if self.enable_cag and self.cag_manager:
+            # Get the latest user query from context
+            latest_user_query = None
             
-            # Get the latest user query
-            user_query = self.context[-1]["content"]
+            if isinstance(self.context, list):
+                for item in reversed(self.context):
+                    if item["role"] == "user":
+                        latest_user_query = item["content"]
+                        break
+            elif isinstance(self.context, dict) and 'history' in self.context:
+                for item in reversed(self.context['history']):
+                    if item["role"] == "user":
+                        latest_user_query = item["content"]
+                        break
             
-            # Get enhanced context from CAG
-            cag_context = self.cag_manager.enhance_prompt(user_query, phase)
-            if cag_context:
-                cag_section = f"## Enhanced Context:\n{cag_context}\n---\n\n"
+            if latest_user_query:
+                # Update session cache with latest context
+                self.cag_manager.update_session_from_bridge_context(
+                    self.context if isinstance(self.context, list) else self.context.get('history', [])
+                )
+                
+                # Get enhanced context from CAG
+                cag_context = self.cag_manager.enhance_prompt(latest_user_query, phase)
+                if cag_context:
+                    cag_section = f"## Enhanced Context:\n{cag_context}\n---\n\n"
         
         # Instructions section based on the current phase
-        instructions_section = ""
-        
         if phase == "planning":
             instructions_section = (
                 "## Planning Instructions:\n"
@@ -241,7 +285,18 @@ class Bridge:
         full_prompt = capabilities_section + state_section + plan_section + cag_section + history_section + instructions_section
         
         # Add final context for user queries
-        if self.context and self.context[-1]["role"] == "user":
+        latest_user_role = None
+        latest_user_content = None
+        
+        if isinstance(self.context, list) and self.context:
+            latest_user_role = self.context[-1].get("role")
+            latest_user_content = self.context[-1].get("content")
+        elif isinstance(self.context, dict) and self.context.get('history', []):
+            latest_item = self.context['history'][-1]
+            latest_user_role = latest_item.get("role")
+            latest_user_content = latest_item.get("content")
+            
+        if latest_user_role == "user":
             if phase == "planning" or not self.current_plan:
                 full_prompt += "## User Query:\nPlease create a plan to address this query. Do not execute any commands yet.\n"
             elif phase == "execution":
@@ -325,744 +380,529 @@ class Bridge:
 
     def _normalize_command_name(self, command_name: str) -> str:
         """
-        Normalize command names from camelCase to snake_case if needed.
+        Normalize a command name (e.g., convert camelCase to snake_case).
         
         Args:
             command_name: The command name to normalize
             
         Returns:
-            Normalized command name
+            The normalized command name or empty string if not found
         """
         # First check if the command name already exists
-        if hasattr(self.ghidra, command_name):
+        if hasattr(self.ghidra_client, command_name):
             return command_name
             
-        # Convert from camelCase to snake_case
-        s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', command_name)
-        snake_case = re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
+        # Try converting camelCase to snake_case
+        snake_case = re.sub(r'(?<!^)(?=[A-Z])', '_', command_name).lower()
         
         # Only return the snake_case version if it exists
-        if hasattr(self.ghidra, snake_case):
-            self.logger.info(f"Normalized command name from '{command_name}' to '{snake_case}'")
+        if hasattr(self.ghidra_client, snake_case):
+            logging.info(f"Normalized command name from '{command_name}' to '{snake_case}'")
             return snake_case
         
-        # If neither exists, return the original (will be handled as an error later)
-        return command_name
+        return ""
 
-    def _execute_single_command(self, command_name: str, params: Dict[str, Any]) -> str:
+    def _check_command_exists(self, command_name: str) -> Tuple[bool, str, List[str]]:
         """
-        Execute a single command using the GhidraMCP client.
+        Check if a command exists and provide suggestions if it doesn't.
         
         Args:
-            command_name: Name of the command to execute
-            params: Parameters for the command
+            command_name: The command name to check
             
         Returns:
-            Result of the command execution
+            Tuple of (exists, error_message, similar_commands)
         """
-        try:
-            # Normalize command name (convert camelCase to snake_case if needed)
-            command_name = self._normalize_command_name(command_name)
+        normalized_command = self._normalize_command_name(command_name)
+        if normalized_command:
+            return True, "", []
             
-            self.logger.info(f"Executing GhidraMCP command: {command_name} with params: {params}")
-            
-            # Get the method on the GhidraMCP client
-            if hasattr(self.ghidra, command_name):
-                method = getattr(self.ghidra, command_name)
-                result = method(**params)
-                
-                # Print the command and result to the terminal for visibility
-                print(f"\n[EXECUTING] {command_name}({', '.join([f'{k}={v!r}' for k, v in params.items()])})")
-                print(f"[RESULT] {result!r}\n")
-                
-                # Update CAG session if enabled
-                if self.enable_cag and self.cag_manager:
-                    if command_name == "decompile_function":
-                        # Extract address from the result (simple heuristic)
-                        # This assumes the function address appears in the decompiled code
-                        address = params.get("name", "unknown")
-                        self.cag_manager.update_from_function_decompile(address, params["name"], result)
-                    elif command_name == "decompile_function_by_address":
-                        address = params.get("address", "unknown")
-                        name = f"FUN_{address}" # Simplistic way to get a name
-                        self.cag_manager.update_from_function_decompile(address, name, result)
-                    elif command_name == "rename_function":
-                        self.cag_manager.update_from_function_rename(params["old_name"], params["new_name"])
-                    elif command_name == "rename_function_by_address":
-                        self.cag_manager.update_from_function_rename(params["address"], params["new_name"])
-                
-                # Update analysis state
-                self._update_analysis_state(command_name, params, result)
-                
-                return result
-            else:
-                error_msg = f"ERROR: Unknown command: {command_name}"
-                self.logger.error(error_msg)
-                
-                # Print error message to terminal
-                print(f"\n[ERROR] Unknown command: {command_name}")
-                
-                # Try to find similar commands
-                similar_commands = self._find_similar_commands(command_name)
-                if similar_commands:
-                    suggestion = f"Did you mean one of these? {', '.join(similar_commands)}"
-                    print(f"[SUGGESTION] {suggestion}")
-                    error_msg += f"\n{suggestion}"
-                    
-                return error_msg
-        except Exception as e:
-            error_msg = f"ERROR: {str(e)}"
-            self.logger.error(f"Error executing command {command_name}: {str(e)}")
-            
-            # Print error to terminal
-            print(f"\n[ERROR] Failed to execute {command_name}: {str(e)}")
-            
-            return self._handle_command_error(command_name, params, error_msg)
-
-    def _find_similar_commands(self, unknown_command: str) -> List[str]:
-        """
-        Find similar commands to suggest when an unknown command is used.
-        
-        Args:
-            unknown_command: The unknown command
-            
-        Returns:
-            List of similar command suggestions
-        """
+        # Command not found, provide helpful suggestions
         available_commands = [
-            name for name in dir(self.ghidra) 
-            if not name.startswith('_') and callable(getattr(self.ghidra, name))
+            name for name in dir(self.ghidra_client) 
+            if not name.startswith('_') and callable(getattr(self.ghidra_client, name))
         ]
         
-        # Find commands with similar prefix or suffix
+        # Find similar commands
         similar_commands = []
-        
-        # Split the unknown command by underscores
-        parts = unknown_command.split('_')
-        
         for cmd in available_commands:
-            # Check for commands with similar prefix
-            if cmd.startswith(parts[0]) or unknown_command.startswith(cmd.split('_')[0]):
+            # Simple similarity check - could be improved
+            if command_name.lower() in cmd.lower() or cmd.lower() in command_name.lower():
                 similar_commands.append(cmd)
-                continue
+        
+        suggestion_msg = ""
+        if similar_commands:
+            suggestion_msg = f"\nDid you mean one of these? {', '.join(similar_commands)}"
+            
+        if command_name == "decompile":
+            suggestion_msg = "\nDid you mean 'decompile_function(name=\"function_name\")' or 'decompile_function_by_address(address=\"1400011a8\")'?"
+        elif command_name == "disassemble":
+            suggestion_msg = "\nThere is no 'disassemble' command. Try 'decompile_function_by_address(address=\"1400011a8\")' instead."
+            
+        error_message = f"Unknown command: {command_name}{suggestion_msg}"
+        return False, error_message, similar_commands
+
+    def _normalize_command_params(self, command_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Normalize command parameters based on command requirements.
+        
+        Args:
+            command_name: The normalized command name
+            params: The original parameters
+            
+        Returns:
+            Normalized parameters
+        """
+        normalized_params = {}
+        
+        # Common parameter name mappings
+        param_mappings = {
+            "functionAddress": "address",
+            "function_address": "address",
+            "functionName": "name",
+            "function_name": "name",
+            "oldName": "old_name",
+            "newName": "new_name"
+        }
+        
+        # Special case normalizations for specific commands
+        command_specific_mappings = {
+            "rename_function_by_address": {
+                "function_address": "address"
+            },
+            "decompile_function_by_address": {
+                "function_address": "address"
+            }
+        }
+        
+        # Apply command-specific normalizations first
+        if command_name in command_specific_mappings:
+            for orig_key, new_key in command_specific_mappings[command_name].items():
+                if orig_key in params:
+                    normalized_params[new_key] = params[orig_key]
+                    logging.info(f"Normalized parameter '{orig_key}' to '{new_key}' for command '{command_name}'")
+        
+        # Then apply general normalizations
+        for key, value in params.items():
+            if key in normalized_params:
+                continue  # Skip if already processed by command-specific normalization
                 
-            # Check for commands with similar purpose
-            if len(parts) > 1 and parts[-1] in cmd:
-                similar_commands.append(cmd)
+            # Apply general parameter name mapping
+            norm_key = param_mappings.get(key, key)
+            if norm_key != key:
+                logging.info(f"Normalized parameter '{key}' to '{norm_key}' for command '{command_name}'")
                 
-        return similar_commands[:3]  # Return top 3 similar commands
+            normalized_params[norm_key] = value
+            
+        return normalized_params
+
+    def execute_command(self, command_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Execute a command with parameters.
+        
+        Args:
+            command_name: The name of the command to execute
+            params: The parameters to pass to the command
+            
+        Returns:
+            The result of the command execution
+        """
+        try:
+            # Normalize command name and parameters
+            normalized_command = self._normalize_command_name(command_name)
+            if not normalized_command:
+                exists, error_message, similar_commands = self._check_command_exists(command_name)
+                if not exists:
+                    raise ValueError(error_message)
+                
+            # Check for required parameters
+            is_valid, error_message = self.command_parser.validate_command_parameters(
+                normalized_command, params
+            )
+            if not is_valid:
+                enhanced_error = self.command_parser.get_enhanced_error_message(
+                    command_name, params, error_message
+                )
+                raise ValueError(enhanced_error)
+                
+            # Find the command in the Ghidra client
+            command_func = getattr(self.ghidra_client, normalized_command)
+            
+            # Execute the command
+            return command_func(**params)
+        except Exception as e:
+            error_message = str(e)
+            enhanced_error = self.command_parser.get_enhanced_error_message(
+                command_name, params, error_message
+            )
+            raise ValueError(enhanced_error) from e
 
     def process_query(self, query: str) -> str:
         """
-        Process a natural language query through the AI with a simplified three-phase approach.
+        Process a natural language query by planning, executing tools, and analyzing results.
         
         Args:
-            query: The user's query
+            query: Natural language query from the user
             
         Returns:
-            The processed response with command results
+            Result of processing the query
         """
-        # Add the query to context
-        self.context.append({"role": "user", "content": query})
-        
-        # Initialize state for this query
-        self.current_plan = None
-        self.planned_tools_tracker = {
-            'planned': [], 'executed': [], 'pending_critical': []
-        }
-        final_response = ""
-        self.partial_outputs = []
-        tool_errors_encountered = False
-        
         try:
-            # 1. PLANNING PHASE: Create a plan for addressing the query
-            self.logger.info("Starting planning phase")
+            # Store the query as our current goal
+            self.current_goal = query
+            self.goal_achieved = False
+            self.goal_steps_taken = 0
             
-            # Send to Ollama for planning
-            planning_prompt = self._build_structured_prompt(phase="planning")
-            planning_response = self.ollama.generate_with_phase(
-                planning_prompt,
-                phase="planning"
-            )
-            self.logger.info(f"Received planning response: {planning_response[:100]}...")
-            
-            # Extract planned tools from the plan
-            self._extract_planned_tools(planning_response)
-            
-            # Store the plan in the context and the state
-            self.current_plan = planning_response
-            self.context.append({"role": "plan", "content": planning_response})
-            
-            # Store in partial outputs for reporting
-            self.partial_outputs.append({
-                "type": "planning", 
-                "content": planning_response,
-                "phase": "planning"
-            })
-            
-            self.logger.info("Planning phase completed")
-            
-            # Check if this is a clarification request
-            if self._check_for_clarification_request(planning_response):
-                return planning_response
-            
-            # 2. EXECUTION PHASE: Execute tools based on the plan
-            execution_response = self._run_execution_phase()
-            
-            # 3. ANALYSIS PHASE: Analyze the results
-            self.logger.info("Starting analysis phase to generate final response")
-            analysis_prompt = self._build_structured_prompt(phase="analysis")
-            analysis_response = self.ollama.generate_with_phase(
-                analysis_prompt,
-                phase="analysis"
-            )
-            self.logger.info(f"Received analysis response: {analysis_response[:100]}...")
-            
-            # Update CAG with analysis result if enabled
-            if self.enable_cag and self.cag_manager:
-                self.cag_manager.update_from_analysis_result(query, planning_prompt, analysis_response)
-                self.cag_manager.save_session()
-            
-            # Extract the final response
-            if "FINAL RESPONSE:" in analysis_response:
-                # Extract the part after "FINAL RESPONSE:"
-                final_parts = analysis_response.split("FINAL RESPONSE:", 1)
-                if len(final_parts) > 1:
-                    final_response = final_parts[1].strip()
+            # Ensure context is initialized as a list if it's not already
+            if not isinstance(self.context, list):
+                if isinstance(self.context, dict) and 'history' in self.context:
+                    self.context = self.context['history']
                 else:
-                    final_response = analysis_response
-            else:
-                final_response = analysis_response
+                    self.context = []
             
-            # Clean up the response to remove any EXECUTE blocks
-            final_response = CommandParser.remove_commands(final_response)
+            # Add user query to context
+            self.add_to_context("user", query)
             
-            return final_response
+            # PHASE 1: Planning - determine what tools need to be called
+            plan_response = self._generate_plan(query)
+            
+            # PHASE 2: Tool Execution - call the tools based on the plan
+            result = self._execute_plan()
+            
+            # PHASE 3: Analysis - analyze results and generate final response
+            response = self._generate_analysis(query, result)
+            
+            # Add assistant response to context
+            self.add_to_context("assistant", response)
+            
+            return response
         except Exception as e:
-            error_msg = f"Error in query processing: {str(e)}"
-            self.logger.error(error_msg)
-            return f"An unexpected error occurred: {str(e)}"
-    
-    def _run_planning_phase(self) -> str:
-        """Run the planning phase to determine what tools to use."""
-        self.logger.info("Starting planning phase")
-        
-        # Build the structured prompt with the current state
-        planning_prompt = self._build_structured_prompt("planning")
-        
-        # Send to Ollama for planning
-        planning_response = self.ollama.generate_with_phase(
-            planning_prompt,
-            phase="planning"
-        )
-        self.logger.info(f"Received planning response: {planning_response[:100]}...")
-        
-        # Extract planned tools from the plan
-        self._extract_planned_tools(planning_response)
-        
-        # Store the plan in the context and the state
-        self.current_plan = planning_response
-        self.context.append({"role": "plan", "content": planning_response})
-        
-        # Store in partial outputs for reporting
-        self.partial_outputs.append({
-            "type": "planning", 
-            "content": planning_response,
-            "phase": "planning"
-        })
-        
-        self.logger.info("Planning phase completed")
-        
-        return planning_response
+            # Log the exception
+            logging.error(f"Error in query processing: {str(e)}")
+            
+            # Return error message
+            return f"Error in query processing: {str(e)}"
 
-    def _run_execution_phase(self) -> str:
-        """Run the execution phase to execute the selected tools."""
-        self.logger.info("Starting execution phase")
+    def _generate_plan(self, query: str) -> str:
+        """
+        Generate a plan for addressing the query using Ollama.
         
-        # Track if any errors were encountered during tool execution
-        tool_errors_encountered = False
-        unknown_commands_attempted = set()
+        Args:
+            query: Natural language query from the user
+            
+        Returns:
+            Plan response
+        """
+        # Use CAG manager to enhance context with knowledge and session data
+        if self.enable_cag and self.cag_manager:
+            # Update session cache with current context
+            self.cag_manager.update_session_from_bridge_context(self.context)
         
-        for step in range(self.max_agent_steps):
-            # Build the structured prompt with the current state and plan
-            prompt = self._build_structured_prompt()
+        logging.info("Starting planning phase")
+        
+        # Build prompt
+        prompt = self._build_structured_prompt(phase="planning") + f"\nUser Query: {query}"
+        
+        # Generate planning response
+        response = self.ollama.generate_with_phase(prompt, phase="planning")
+        
+        # Extract plan
+        self.current_plan = response
+        logging.info(f"Received planning response: {response[:100]}...")
+        
+        # Parse the planned tools
+        self.current_plan_tools = self._parse_plan_tools(response)
+        logging.info(f"Extracted {len(self.current_plan_tools)} planned tools from plan")
+        
+        # Add plan to context
+        self.add_to_context("plan", response)
+        
+        logging.info("Planning phase completed")
+        return response
+
+    def _display_tool_result(self, cmd_name: str, result: Any) -> None:
+        """
+        Display a tool result to the user in a clear, formatted way.
+        
+        Args:
+            cmd_name: The name of the command executed
+            result: The result from the command execution
+        """
+        # List of "verbose" commands that should display their full results
+        verbose_commands = ["list_functions", "list_methods", "list_imports", "list_exports", 
+                           "search_functions_by_name", "decompile_function", "decompile_function_by_address"]
+        
+        # Special handling based on command type
+        if cmd_name in verbose_commands:
+            print("\n" + "="*60)
+            print(f"Results from {cmd_name}:")
+            print("="*60)
             
-            # Send to Ollama
-            self.logger.info(f"Step {step+1}/{self.max_agent_steps}: Sending query to Ollama")
+            # Format based on result type
+            if isinstance(result, list):
+                # For lists like function lists, show with numbering
+                for i, item in enumerate(result, 1):
+                    if isinstance(item, dict) and "name" in item and "address" in item:
+                        print(f"{i:3d}. {item['name']} @ {item['address']}")
+                    elif isinstance(item, dict):
+                        print(f"{i:3d}. {item}")
+                    else:
+                        print(f"{i:3d}. {item}")
+                print(f"\nTotal: {len(result)} items")
+            elif isinstance(result, dict):
+                # For dictionary results
+                for key, value in result.items():
+                    print(f"{key}: {value}")
+            elif isinstance(result, str) and len(result) > 500:
+                # For long string results (like decompiled code)
+                print(f"{result[:500]}...\n[Showing first 500 characters of {len(result)} total]")
+            else:
+                # For other results
+                print(result)
             
-            try:
-                # Get AI response
-                ai_response = self.ollama.generate_with_phase(
-                    prompt,
-                    phase="execution"
-                )
-                self.logger.info(f"Received response from Ollama: {ai_response[:100]}...")
+            print("="*60 + "\n")
+        else:
+            # For non-verbose commands, just show a success message
+            print(f"✓ Successfully executed {cmd_name}")
+            
+    def _execute_plan(self) -> str:
+        """
+        Execute the plan by processing each tool in sequence.
+        
+        Returns:
+            Combined results of all tool executions
+        """
+        logging.info("Starting execution phase")
+        
+        all_results = []
+        self.goal_steps_taken = 0
+        step_count = 0
+        goal_statement = f"Goal: {self.current_goal}"
+        
+        # Loop until we hit max steps or goal is achieved
+        while step_count < self.max_goal_steps and not self.goal_achieved:
+            step_count += 1
+            self.goal_steps_taken = step_count
+            
+            logging.info(f"Step {step_count}/{self.max_goal_steps}: Sending query to Ollama")
+            
+            # Build prompt for tool execution, including the goal and current state
+            state_context = self._build_structured_prompt(phase="execution")
+            prompt = f"{state_context}\n{goal_statement}\nStep {step_count}: Determine the next tool to call or mark the goal as completed."
+            
+            # Use CAG to enhance context with knowledge and session data
+            if self.enable_cag and self.cag_manager:
+                # Update session cache with current context
+                self.cag_manager.update_session_from_bridge_context(self.context)
+            
+            # Generate execution step
+            response = self.ollama.generate_with_phase(prompt, phase="execution")
+            logging.info(f"Received response from Ollama: {response[:100]}...")
+            
+            # Extract commands to execute
+            commands = self.command_parser.extract_commands(response)
+            
+            # If no commands but the response indicates goal completion, mark as achieved
+            if not commands and ("GOAL ACHIEVED" in response.upper() or "GOAL COMPLETE" in response.upper()):
+                logging.info("AI indicates the goal has been achieved")
+                self.goal_achieved = True
+                all_results.append(f"Step {step_count} - Goal achievement indicated: {response}")
+                break
                 
-                # Capture the full response as logged
-                self.partial_outputs.append({
-                    "type": "raw_response",
-                    "content": ai_response,
-                    "step": step + 1
-                })
-                
-                # Check if this is a clarification request
-                if self._check_for_clarification_request(ai_response):
-                    self.logger.info("AI is requesting clarification from user")
-                    return ai_response  # Return the question directly to the user
-                    
-                # Extract any tool suggestions
-                ai_response, suggestions = self._extract_suggestions(ai_response)
-                
-                # Parse commands from the response
-                commands = CommandParser.extract_commands(ai_response)
-                
-                # Clean the response text (remove EXECUTE blocks)
-                clean_response = self._remove_commands(ai_response)
-                
-                # Add the clean response to context
-                if clean_response.strip():
-                    self.context.append({"role": "assistant", "content": clean_response.strip()})
-                    final_response = clean_response.strip()
-                    # Store the assistant's reasoning as a partial output
-                    self.partial_outputs.append({
-                        "type": "reasoning",
-                        "content": clean_response.strip(),
-                        "step": step + 1
-                    })
-                
-                # If no commands found, we're done with the tool execution phase
-                if not commands:
-                    self.logger.info("No commands found in AI response, ending tool execution loop")
-                    break
-                
-                # Execute each command and add to context
-                all_results = []
-                step_errors = False
-                
-                for cmd_name, cmd_params in commands:
+            # Execute commands
+            execution_result = ""
+            for cmd_name, cmd_params in commands:
+                try:
                     # Add tool call to context
-                    params_str = ", ".join([f"{k}=\"{v}\"" for k, v in cmd_params.items()])
-                    tool_call = f"EXECUTE: {cmd_name}({params_str})"
-                    self.context.append({"role": "tool_call", "content": tool_call})
+                    tool_call = f"EXECUTE: {cmd_name}({', '.join([f'{k}=\"{v}\"' for k, v in cmd_params.items()])})"
+                    self.add_to_context("tool_call", tool_call)
                     
-                    # Execute the command
-                    result = self._execute_single_command(cmd_name, cmd_params)
-                    all_results.append((tool_call, result))
+                    # Execute command with parameter normalization
+                    logging.info(f"Executing GhidraMCP command: {cmd_name} with params: {cmd_params}")
+                    result = self.execute_command(cmd_name, cmd_params)
                     
-                    # Update planned tools tracker
-                    self._mark_tool_as_executed(cmd_name, cmd_params)
+                    # Display the result to the user
+                    self._display_tool_result(cmd_name, result)
                     
-                    # Check if this was an error and track unknown commands
-                    if "ERROR: Unknown command" in result:
-                        unknown_commands_attempted.add(cmd_name)
-                        step_errors = True
-                        tool_errors_encountered = True
-                    elif "ERROR:" in result or "Failed" in result:
-                        step_errors = True
-                        tool_errors_encountered = True
+                    # Format the result for context and logging
+                    if isinstance(result, dict) or isinstance(result, list):
+                        execution_result = json.dumps(result, indent=2)
+                    else:
+                        execution_result = str(result)
                     
-                    # Add result to context
-                    self.context.append({"role": "tool_result", "content": result})
+                    # Add command result to context
+                    self.add_to_context("tool_result", execution_result)
                     
-                    # Store the tool result as a partial output
-                    self.partial_outputs.append({
-                        "type": "tool_result",
-                        "tool": cmd_name,
-                        "params": cmd_params,
-                        "result": result,
-                        "step": step + 1
-                    })
+                    # Update analysis state
+                    command = {"name": cmd_name, "params": cmd_params}
+                    self._update_analysis_state(command, execution_result)
+                    
+                    # Add to all results
+                    all_results.append(f"Command: {cmd_name}\nResult: {execution_result}\n")
                 
-                # Update final response with results
-                final_response = clean_response + "\n\n" + "\n".join([result for _, result in all_results])
-                
-                # Check if any command failed - if so, let the AI try again in the next step
-                if not step_errors:
-                    # If all commands succeeded, we can break the loop
-                    self.logger.info("All commands executed successfully, ending tool execution loop")
-                    break
-                
-            except Exception as e:
-                error_msg = f"Error in agent step {step+1}: {str(e)}"
-                self.logger.error(error_msg)
-                final_response = f"Sorry, I encountered an error: {str(e)}"
-                tool_errors_encountered = True
+                except Exception as e:
+                    error_msg = f"ERROR: {str(e)}"
+                    logging.error(f"Error executing {cmd_name}: {error_msg}")
+                    execution_result = error_msg
+                    self.add_to_context("tool_error", error_msg)
+                    all_results.append(f"Command: {cmd_name}\nError: {error_msg}\n")
+                    print(f"❌ Error executing {cmd_name}: {error_msg}")
+            
+            # If no commands were found, note this and end loop if it's the second consecutive time
+            if not commands:
+                logging.info("No commands found in AI response, ending tool execution loop")
+                all_results.append(f"Step {step_count} - No tool calls: {response}")
                 break
         
-        # 3. Secondary review and reasoning loop - evaluates completeness of response
-        self.logger.info("Starting review and reasoning phase")
-        review_step = 0
-        has_final_response = False
-        
-        # Counter to prevent infinite implied action detection loops
-        implied_action_counter = 0
-        max_implied_action_checks = 3
-        
-        while review_step < self.max_agent_steps and not has_final_response:
-            # Check if current final_response already contains "FINAL RESPONSE"
-            if "FINAL RESPONSE:" in final_response:
-                # Extract the part after "FINAL RESPONSE:"
-                final_parts = final_response.split("FINAL RESPONSE:", 1)
-                potential_final = ""
-                if len(final_parts) > 1:
-                    potential_final = final_parts[1].strip()
-                
-                # Check for implied actions without commands - with safety counter
-                if implied_action_counter < max_implied_action_checks:
-                    implied_actions_prompt = self._check_implied_actions_without_commands(final_response)
-                    if implied_actions_prompt:
-                        self.logger.info(f"Found implied actions without commands in final response (check {implied_action_counter+1}/{max_implied_action_checks})")
-                        # Add a prompt for the next round asking for explicit commands
-                        self.context.append({"role": "review", "content": implied_actions_prompt})
-                        implied_action_counter += 1
-                        review_step += 1  # Increment review step to avoid infinite loop
-                        continue  # Skip to next review round
-                else:
-                    self.logger.warning(f"Reached maximum implied action checks ({max_implied_action_checks}), proceeding with review")
-                
-                # Check the quality of the final response
-                if self._check_final_response_quality(potential_final):
-                    has_final_response = True
-                    self.logger.info("Found high-quality 'FINAL RESPONSE' marker, ending review loop")
-                    final_response = potential_final
-                    break
-                else:
-                    # If the final response indicates limitations, continue with more review steps
-                    self.logger.info("Found 'FINAL RESPONSE' marker but response indicates limitations, continuing review")
-                    # If tool errors were encountered, mention them explicitly in the prompt
-                    if tool_errors_encountered:
-                        review_prompt = (
-                            f"Some tool errors or missing commands were encountered during execution. "
-                            f"Based on the available information so far, please provide the most complete analysis possible "
-                            f"using only the tools that worked successfully. "
-                            f"If you've completed your analysis with available tools, provide a final answer prefixed with 'FINAL RESPONSE:'"
-                        )
-                        if unknown_commands_attempted:
-                            cmd_list = ", ".join(f"'{cmd}'" for cmd in unknown_commands_attempted)
-                            review_prompt += f"\n\nNote: These commands are not available: {cmd_list}. Use alternatives."
-                    else:
-                        review_prompt = (
-                            f"Your previous final response indicated some limitations. Please review your analysis again "
-                            f"and see if you can overcome these limitations with alternative approaches. "
-                            f"If you've completed your analysis, provide a final answer prefixed with 'FINAL RESPONSE:'"
-                        )
-                    
-                    # Add information about pending critical tools
-                    pending_tools_prompt = self._get_pending_critical_tools_prompt()
-                    if pending_tools_prompt:
-                        review_prompt += pending_tools_prompt
-                        
-                    self.context.append({"role": "review", "content": review_prompt})
-            else:
-                # Regular review prompt
-                review_prompt = (
-                    f"Review your analysis so far. Have you completed the task? "
-                    f"If not, what additional information or analysis is needed? "
-                    f"If yes, provide a complete and comprehensive final answer prefixed with 'FINAL RESPONSE:'"
-                )
-                
-                # Add information about pending critical tools
-                pending_tools_prompt = self._get_pending_critical_tools_prompt()
-                if pending_tools_prompt:
-                    review_prompt += pending_tools_prompt
-                    
-                self.context.append({"role": "review", "content": review_prompt})
+        if step_count >= self.max_goal_steps:
+            logging.info(f"Reached maximum steps ({self.max_goal_steps}), ending tool execution loop")
             
-            # Build a new prompt with the review context
-            prompt = self._build_structured_prompt()
-            
-            # Send to Ollama for review
-            self.logger.info(f"Review step {review_step+1}/{self.max_agent_steps}: Sending query to Ollama")
-            ai_review_response = self.ollama.generate_with_phase(
-                prompt,
-                phase="analysis"
-            )
-            self.logger.info(f"Received review response: {ai_review_response[:100]}...")
-            
-            # Check if this is a clarification request
-            if self._check_for_clarification_request(ai_review_response):
-                self.logger.info("AI is requesting clarification from user during review")
-                return ai_review_response  # Return the question directly to the user
-                
-            # Extract any tool suggestions
-            ai_review_response, suggestions = self._extract_suggestions(ai_review_response)
-            
-            # Clean the response and update
-            clean_review = self._remove_commands(ai_review_response)
-            if clean_review.strip():
-                self.context.append({"role": "assistant", "content": clean_review.strip()})
-                final_response = clean_review.strip()
-                
-                # Check if this response has the final marker
-                if "FINAL RESPONSE:" in clean_review:
-                    # Extract the part after "FINAL RESPONSE:"
-                    final_parts = clean_review.split("FINAL RESPONSE:", 1)
-                    potential_final = ""
-                    if len(final_parts) > 1:
-                        potential_final = final_parts[1].strip()
-                    
-                    # Check for implied actions without commands - with safety counter
-                    if implied_action_counter < max_implied_action_checks:
-                        implied_actions_prompt = self._check_implied_actions_without_commands(final_response)
-                        if implied_actions_prompt:
-                            self.logger.info(f"Found implied actions without commands in final response (check {implied_action_counter+1}/{max_implied_action_checks})")
-                            # Add a prompt for the next round asking for explicit commands
-                            self.context.append({"role": "review", "content": implied_actions_prompt})
-                            implied_action_counter += 1
-                            review_step += 1  # Increment review step to avoid infinite loop
-                            continue  # Skip to next review round
-                    else:
-                        self.logger.warning(f"Reached maximum implied action checks ({max_implied_action_checks}), proceeding with review")
-            
-            review_step += 1
-                
-        # If we exited the loop without finding a final response marker, just use what we have
-        if not has_final_response:
-            self.logger.info(f"Reached maximum review rounds ({self.max_agent_steps}) without final response marker")
-            
-            # Generate a cohesive report from partial outputs if no final response marker was found
-            final_response = self._generate_cohesive_report()
-            
-        return final_response
-    
-    def _remove_commands(self, text: str) -> str:
-        """
-        Remove EXECUTE command blocks from text to get the clean response.
-        
-        Args:
-            text: The text containing EXECUTE blocks
-            
-        Returns:
-            Clean text with EXECUTE blocks removed
-        """
-        return CommandParser.remove_commands(text)
-    
-    def _handle_command_error(self, command_name: str, params: Dict[str, Any], error_message: str) -> str:
-        """
-        Handle command errors with recovery actions and enhanced error messages.
-        
-        Args:
-            command_name: The command that was executed
-            params: The parameters that were used
-            error_message: The original error message
-            
-        Returns:
-            Enhanced error message with recovery suggestions
-        """
-        self.logger.error(f"Error executing {command_name}: {error_message}")
-        
-        # Attempt recovery action based on the command and error
-        recovery_result = None
-        recovery_performed = False
-        suggestion = ""
-        
-        # Function not found errors
-        if "not found" in error_message.lower() or "does not exist" in error_message.lower():
-            if command_name in ["rename_function_by_address", "decompile_function_by_address", "disassemble_function"]:
-                # Try to get a list of functions to verify if the address exists
-                self.logger.info(f"Attempting recovery by listing available functions")
-                try:
-                    functions = self.ghidra.list_functions()
-                    if isinstance(functions, list) and functions:
-                        recovery_result = f"Available functions (sample): {', '.join(functions[:10])}"
-                        recovery_performed = True
-                        suggestion = "Use list_functions() to see all available functions and verify addresses."
-                except Exception as e:
-                    self.logger.error(f"Recovery attempt failed: {str(e)}")
-                    
-        # Address format errors
-        if "address" in error_message.lower() and "invalid" in error_message.lower():
-            if "function_address" in params:
-                # Attempt to format the address correctly
-                addr = params.get("function_address", "")
-                if addr.startswith("FUN_"):
-                    suggestion = f"Function addresses should not include 'FUN_' prefix. Try '{addr[4:]}' instead."
-                elif not addr.startswith("0x") and all(c in "0123456789abcdefABCDEF" for c in addr):
-                    suggestion = f"Try formatting the address with '0x' prefix: '0x{addr}'"
-                    
-        # Network or connection errors
-        if "connection" in error_message.lower() or "timeout" in error_message.lower():
-            suggestion = "Check if Ghidra and the GhidraMCP server are running and accessible."
-            
-        # Get enhanced error from CommandParser
-        enhanced_error = CommandParser.get_enhanced_error_message(command_name, params, error_message)
-        
-        # Build the final error message
-        final_error = enhanced_error
-        if recovery_performed and recovery_result:
-            final_error += f"\n\nRecovery information: {recovery_result}"
-        if suggestion:
-            final_error += f"\n\nSuggestion: {suggestion}"
-            
-        return final_error
-    
-    def _parse_and_execute_commands(self, response: str) -> str:
-        """
-        Parse the AI response to identify and execute GhidraMCP commands.
-        Supports both traditional EXECUTE: format and JSON tool format.
-        
-        Args:
-            response: The AI's response text
-            
-        Returns:
-            The processed response with command results
-        """
-        # Extract commands using the CommandParser (now handles both formats)
-        commands = CommandParser.extract_commands(response)
-        
-        if not commands:
-            # No commands to execute, return the response as is
-            return response
-            
-        # Process each command
-        for command_name, params in commands:
-            try:
-                # Check if the command is available in the GhidraMCP client
-                if hasattr(self.ghidra, command_name):
-                    self.logger.info(f"Executing GhidraMCP command: {command_name} with params: {params}")
-                    
-                    # Call the method on the GhidraMCP client
-                    cmd_method = getattr(self.ghidra, command_name)
-                    cmd_result = cmd_method(**params)
-                    
-                    # Check if there was an error
-                    if isinstance(cmd_result, dict) and "error" in cmd_result:
-                        error_msg = f"ERROR: {cmd_result.get('error')}"
-                        self.logger.error(error_msg)
-                        
-                        # Try to replace both traditional and JSON formats
-                        # Traditional format replacement
-                        command_str = f"EXECUTE: {command_name}({', '.join([f'{k}=\"{v}\"' for k, v in params.items()])})"
-                        response = response.replace(command_str, error_msg)
-                        
-                        # JSON format replacement (more complex)
-                        json_pattern = re.compile(r'```json\s*\{\s*"tool"\s*:\s*"' + re.escape(command_name) + r'"\s*,.*?\}\s*```', re.DOTALL)
-                        response = re.sub(json_pattern, error_msg, response)
-                    else:
-                        # Format the command result
-                        formatted_result = f"RESULT: {json.dumps(cmd_result, indent=2)}"
-                        
-                        # Replace both traditional and JSON formats
-                        # Traditional format replacement
-                        command_str = f"EXECUTE: {command_name}({', '.join([f'{k}=\"{v}\"' for k, v in params.items()])})"
-                        response = response.replace(command_str, formatted_result)
-                        
-                        # JSON format replacement
-                        json_pattern = re.compile(r'```json\s*\{\s*"tool"\s*:\s*"' + re.escape(command_name) + r'"\s*,.*?\}\s*```', re.DOTALL)
-                        response = re.sub(json_pattern, formatted_result, response)
-                else:
-                    error_msg = f"ERROR: Unknown command '{command_name}'"
-                    self.logger.error(error_msg)
-                    
-                    # Replace both traditional and JSON formats
-                    # Traditional format replacement
-                    command_str = f"EXECUTE: {command_name}({', '.join([f'{k}=\"{v}\"' for k, v in params.items()])})"
-                    response = response.replace(command_str, error_msg)
-                    
-                    # JSON format replacement
-                    json_pattern = re.compile(r'```json\s*\{\s*"tool"\s*:\s*"' + re.escape(command_name) + r'"\s*,.*?\}\s*```', re.DOTALL)
-                    response = re.sub(json_pattern, error_msg, response)
-            except Exception as e:
-                # Handle any exceptions during execution
-                error_msg = f"ERROR executing {command_name}: {str(e)}"
-                self.logger.error(error_msg)
-                
-                # Replace both formats
-                command_str = f"EXECUTE: {command_name}({', '.join([f'{k}=\"{v}\"' for k, v in params.items()])})"
-                response = response.replace(command_str, error_msg)
-                
-                json_pattern = re.compile(r'```json\s*\{\s*"tool"\s*:\s*"' + re.escape(command_name) + r'"\s*,.*?\}\s*```', re.DOTALL)
-                response = re.sub(json_pattern, error_msg, response)
-                
-        return response
-    
-    def health_check(self) -> Dict[str, bool]:
-        """
-        Check the health of both Ollama and GhidraMCP services.
-        
-        Returns:
-            Dict with health status of each service
-        """
-        return {
-            "ollama": self.ollama.health_check(),
-            "ghidra": self.ghidra.health_check()
-        }
+        logging.info("Execution phase completed")
+        return "\n".join(all_results)
 
-    def _should_summarize_context(self) -> bool:
+    def _evaluate_goal_completion(self, query: str, execution_results: str) -> bool:
         """
-        Determine if the context should be summarized based on length.
+        Evaluate whether the current goal has been achieved based on execution results.
         
+        Args:
+            query: The original query/goal
+            execution_results: Results from tool executions
+            
         Returns:
-            True if context should be summarized, False otherwise
+            True if goal is achieved, False otherwise
         """
-        return len(self.context) >= self.config.context_limit * 0.8
-    
-    def _summarize_context(self) -> None:
+        logging.info("Evaluating goal completion")
+        
+        # Build prompt for goal evaluation
+        state_context = self._build_structured_prompt(phase="evaluation")
+        prompt = f"{state_context}\nGoal: {query}\nExecution Results:\n{execution_results}\n\nQuestion: Has the goal been achieved? Respond with 'GOAL ACHIEVED' if yes, or 'GOAL NOT ACHIEVED' if more tool calls are needed."
+        
+        # Generate evaluation response
+        response = self.ollama.generate_with_phase(prompt, phase="execution")
+        
+        # Check if goal is achieved
+        goal_achieved = "GOAL ACHIEVED" in response.upper()
+        logging.info(f"Goal evaluation: {'Achieved' if goal_achieved else 'Not achieved'}")
+        
+        return goal_achieved
+
+    def _clean_final_response(self, response: str) -> str:
         """
-        Summarize the conversation context to preserve key information while reducing length.
+        Clean up the final response for display by removing markers and formatting.
+        
+        Args:
+            response: The raw final response
+            
+        Returns:
+            Cleaned response text
         """
-        if len(self.context) <= 5:  # Don't summarize very short contexts
-            return
-            
-        # Create a prompt for the LLM to summarize the context
-        summarization_instruction = (
-            "Summarize the key points, findings, and outstanding tasks from this conversation history. "
-            "Preserve important technical details, especially addresses and function names. "
-            "Format the summary in bullet points with the most important information first."
-        )
+        # Remove "FINAL RESPONSE:" marker if present
+        cleaned = re.sub(r'^FINAL RESPONSE:\s*', '', response, flags=re.IGNORECASE)
         
-        # Build a prompt with just the context to summarize
-        context_items = []
-        # Get items except the last few (keep recent items unsummarized)
-        items_to_summarize = self.context[:-5]
-        for item in items_to_summarize:
-            prefix = "User: " if item["role"] == "user" else \
-                    "Assistant: " if item["role"] == "assistant" else \
-                    "Tool Call: " if item["role"] == "tool_call" else \
-                    "Tool Result: " if item["role"] == "tool_result" else \
-                    "AI Review: " if item["role"] == "review" else \
-                    "Plan: " if item["role"] == "plan" else \
-                    "Summary: " if item["role"] == "summary" else \
-                    f"{item['role'].capitalize()}: "
-            context_items.append(f"{prefix}{item['content']}")
+        # Remove any trailing instructions or markers
+        cleaned = re.sub(r'\n+\s*EXECUTE:.*$', '', cleaned, flags=re.MULTILINE)
         
-        context_text = "\n".join(context_items)
-        summarization_prompt = f"{context_text}\n\n{summarization_instruction}"
+        # Remove any markdown formatting intended for the AI but not for display
+        cleaned = re.sub(r'^\s*```.*?```\s*$', '', cleaned, flags=re.MULTILINE | re.DOTALL)
         
-        try:
-            # Ask the LLM to summarize
-            self.logger.info("Summarizing conversation context")
-            summary = self.ollama.generate_with_phase(
-                summarization_prompt,
-                phase="analysis",
-                system_prompt="You are a helpful assistant tasked with summarizing technical conversations about reverse engineering."
-            )
+        return cleaned.strip()
+
+    def _generate_analysis(self, query: str, execution_results: str) -> str:
+        """
+        Analyze the results of tool executions and generate a final response.
+        
+        Args:
+            query: The original query
+            execution_results: Results from tool executions
             
-            # Replace the old context items with the new summary
-            # Keep all special entries (plans, etc.) but remove regular conversation
-            kept_items = [item for item in self.context[-5:]]  # Keep the most recent items
-            special_items = [item for item in items_to_summarize if item["role"] not in ["user", "assistant", "tool_call", "tool_result"]]
+        Returns:
+            Final analysis response
+        """
+        logging.info("Starting review and reasoning phase")
+        
+        self.goal_achieved = False
+        review_steps = 0
+        max_review_steps = self.max_goal_steps
+        final_response = ""
+        review_results = []
+        
+        # Phase to iteratively review and refine our understanding
+        while not self.goal_achieved and review_steps < max_review_steps:
+            review_steps += 1
+            logging.info(f"Review step {review_steps}/{max_review_steps}: Sending query to Ollama")
             
-            # Create a new context with the summary as the first item
-            new_context = [{"role": "summary", "content": summary}]
-            new_context.extend(special_items)
-            new_context.extend(kept_items)
+            # Build prompt for review
+            state_context = self._build_structured_prompt(phase="review")
+            current_goal = f"Goal: {self.current_goal}"
+            review_prompt = f"{state_context}\n{current_goal}\nExecution Results:\n{execution_results}\n\nReview the results and provide analysis. If you need to execute more tools, use the EXECUTE format. Otherwise, provide your FINAL RESPONSE when you've fully addressed the goal."
             
-            self.context = new_context
-            self.logger.info(f"Context summarized, reduced from {len(items_to_summarize) + 5} to {len(new_context)} items")
+            # Use CAG to enhance context
+            if self.enable_cag and self.cag_manager:
+                self.cag_manager.update_session_from_bridge_context(self.context)
             
-        except Exception as e:
-            self.logger.error(f"Error summarizing context: {str(e)}")
-            # If summarization fails, fall back to simple truncation
-            self.context = self.context[-self.config.context_limit:]
+            # Generate review response
+            review_response = self.ollama.generate_with_phase(review_prompt, phase="analysis")
+            logging.info(f"Received review response: {review_response[:100]}...")
             
-    def _update_analysis_state(self, command_name: str, params: Dict[str, Any], result: str) -> None:
+            # Check for the final response marker
+            final_response_match = re.search(r'FINAL RESPONSE:\s*(.*?)(?:\n\s*$|\Z)', 
+                                             review_response, re.DOTALL)
+            if final_response_match:
+                final_response = final_response_match.group(1).strip()
+                
+                # Validate that the final response is reasonable
+                if final_response and len(final_response) > 100:
+                    logging.info("Found high-quality 'FINAL RESPONSE' marker in review, ending review loop")
+                    self.goal_achieved = True
+                    break
+                elif final_response:
+                    if "unable" in final_response.lower() or "limit" in final_response.lower():
+                        logging.info(f"Final response is too short ({len(final_response)} chars)")
+                        logging.info("Found 'FINAL RESPONSE' marker but response indicates limitations, continuing review")
+                else:
+                    logging.info("'FINAL RESPONSE' marker found but unable to extract response")
+            
+            # Check for additional tool calls in the review
+            commands = self.command_parser.extract_commands(review_response)
+            if commands:
+                for cmd_name, cmd_params in commands:
+                    try:
+                        # Execute command
+                        result = self.execute_command(cmd_name, cmd_params)
+                        
+                        # Format result for display
+                        formatted_result = self.command_parser.format_command_results(cmd_name, cmd_params, result)
+                        logging.info(f"Review command executed: {cmd_name}")
+                        
+                        # Add result to context
+                        self.add_to_context("tool_result", formatted_result)
+                        
+                        review_results.append(f"Tool Call: {cmd_name}\nTool Result: {formatted_result}\n")
+                    except Exception as e:
+                        error_msg = f"ERROR: {str(e)}"
+                        logging.error(f"Error executing review command {cmd_name}: {error_msg}")
+                        self.add_to_context("tool_error", error_msg)
+                        review_results.append(f"Error executing {cmd_name}: {error_msg}")
+            
+            # If no commands and no final response yet, continue
+            if not commands and not final_response:
+                review_results.append(f"Review step {review_steps}: {review_response}")
+        
+        # If we have a final response, add it to the results
+        if final_response:
+            # Clean up the response for display
+            display_response = self._clean_final_response(final_response)
+            review_results.append(f"FINAL RESPONSE:\n{display_response}")
+        else:
+            review_results.append("No final response generated during review")
+            
+        return "\n".join(review_results)
+
+    def _update_analysis_state(self, command: Dict[str, Any], result: str) -> None:
         """
         Update the internal analysis state based on the executed command and result.
         
         Args:
-            command_name: The command that was executed
-            params: The parameters that were used
+            command: The executed command
             result: The result of the command
         """
         # Only update state if command was successful
@@ -1070,24 +910,24 @@ class Bridge:
             return
             
         # Track decompiled functions
-        if command_name == "decompile_function" and "name" in params:
-            self.analysis_state["functions_analyzed"].add(params["name"])
+        if command['name'] == "decompile_function" and "name" in command['params']:
+            self.analysis_state['functions_analyzed'].add(command['params']['name'])
             
-        elif command_name == "decompile_function_by_address" and "address" in params:
-            address = params["address"]
-            self.analysis_state["functions_decompiled"].add(address)
-            self.analysis_state["functions_analyzed"].add(address)
+        elif command['name'] == "decompile_function_by_address" and "address" in command['params']:
+            address = command['params']['address']
+            self.analysis_state['functions_decompiled'].add(address)
+            self.analysis_state['functions_analyzed'].add(address)
             
         # Track renamed functions
-        elif command_name == "rename_function" and "old_name" in params and "new_name" in params:
-            self.analysis_state["functions_renamed"][params["old_name"]] = params["new_name"]
+        elif command['name'] == "rename_function" and "old_name" in command['params'] and "new_name" in command['params']:
+            self.analysis_state['functions_renamed'][command['params']['old_name']] = command['params']['new_name']
             
-        elif command_name == "rename_function_by_address" and "address" in params and "new_name" in params:
-            self.analysis_state["functions_renamed"][params["address"]] = params["new_name"]
+        elif command['name'] == "rename_function_by_address" and "function_address" in command['params'] and "new_name" in command['params']:
+            self.analysis_state['functions_renamed'][command['params']['function_address']] = command['params']['new_name']
             
         # Track comments added
-        elif command_name in ["set_decompiler_comment", "set_disassembly_comment"] and "address" in params and "comment" in params:
-            self.analysis_state["comments_added"][params["address"]] = params["comment"]
+        elif command['name'] in ["set_decompiler_comment", "set_disassembly_comment"] and "address" in command['params'] and "comment" in command['params']:
+            self.analysis_state['comments_added'][command['params']['address']] = command['params']['comment']
     
     def _check_for_clarification_request(self, response: str) -> bool:
         """
@@ -1340,72 +1180,61 @@ class Bridge:
         
         return report.strip()
     
-    def _extract_planned_tools(self, plan_text: str) -> None:
+    def _parse_plan_tools(self, plan: str) -> List[Dict[str, Any]]:
         """
-        Extract planned tool calls from the AI's planning response.
-        Identifies which tools the AI plans to use and marks critical ones.
+        Parse the plan text to extract the planned tools.
         
         Args:
-            plan_text: The AI's planning response text
+            plan: The plan text
+            
+        Returns:
+            List of tool dictionaries, where each dictionary contains 'name' and 'params'
         """
-        # Reset the planned tools tracker for the new plan
-        self.planned_tools_tracker = {
-            'planned': [],
-            'executed': [],
-            'pending_critical': []
-        }
+        tools = []
         
-        # Common tools that might be mentioned in plans
-        common_tools = [
-            "list_functions", "list_methods", "decompile_function", "decompile_function_by_address",
-            "rename_function", "rename_function_by_address", "set_decompiler_comment", 
-            "set_disassembly_comment", "search_functions_by_name", "disassemble_function"
-        ]
-        
-        # Patterns that indicate a tool is critical to the task
-        critical_patterns = [
-            "will need to", "essential", "necessary", "required", "important", 
-            "critical", "key step", "must", "rename", "need to"
-        ]
-        
-        # Process each line of the plan
-        lines = plan_text.lower().split('\n')
-        for i, line in enumerate(lines):
-            # Check for mentions of tools in this line
-            for tool in common_tools:
-                if tool.lower() in line:
-                    # Check if this is part of a numbered or bulleted step
-                    is_step = bool(re.match(r'^\s*(\d+\.|[\-\*•])', line))
-                    
-                    # Look at surrounding context (current line and next line if available)
-                    context = line
-                    if i < len(lines) - 1:
-                        context += " " + lines[i + 1]
-                    
-                    # Determine if this tool is critical based on context
-                    is_critical = False
-                    for pattern in critical_patterns:
-                        if pattern in context:
-                            is_critical = True
-                            break
-                    
-                    # Create a tool tracking entry
-                    tool_entry = {
-                        'tool': tool,
-                        'execution_status': 'pending',
-                        'is_critical': is_critical or 'rename' in tool,  # Always mark rename operations as critical
-                        'context': context
-                    }
-                    
-                    self.planned_tools_tracker['planned'].append(tool_entry)
-                    
-                    # Add critical tools to the pending critical list
-                    if tool_entry['is_critical']:
-                        self.planned_tools_tracker['pending_critical'].append(tool_entry)
+        # Look for the PLAN: section
+        if "PLAN:" in plan:
+            plan_section = plan.split("PLAN:", 1)[1].strip()
+            
+            # Extract each line that starts with "TOOL: "
+            lines = plan_section.split('\n')
+            for line in lines:
+                line = line.strip()
+                if line.startswith("TOOL: "):
+                    try:
+                        # Parse the tool line into name and params
+                        tool_part = line[len("TOOL: "):].strip()
+                        name_part, params_part = tool_part.split(" PARAMS: ", 1)
+                        name = name_part.strip()
                         
-        self.logger.info(f"Extracted {len(self.planned_tools_tracker['planned'])} planned tools from plan")
-        if self.planned_tools_tracker['pending_critical']:
-            self.logger.info(f"Identified {len(self.planned_tools_tracker['pending_critical'])} critical tools in plan")
+                        # Parse parameters if any
+                        params = {}
+                        if params_part.strip():
+                            param_pairs = params_part.split(", ")
+                            for pair in param_pairs:
+                                if "=" in pair:
+                                    key, value = pair.split("=", 1)
+                                    key = key.strip()
+                                    value = value.strip()
+                                    
+                                    # Remove quotes from string values
+                                    if value.startswith('"') and value.endswith('"'):
+                                        value = value[1:-1]
+                                        
+                                    # Convert numeric values to integers if appropriate
+                                    if value.isdigit():
+                                        value = int(value)
+                                        
+                                    params[key] = value
+                        
+                        tools.append({
+                            'name': name,
+                            'params': params
+                        })
+                    except Exception as e:
+                        logging.error(f"Error parsing tool line '{line}': {str(e)}")
+        
+        return tools
 
     def _mark_tool_as_executed(self, command_name: str, params: Dict[str, Any]) -> None:
         """
@@ -1498,6 +1327,187 @@ class Bridge:
                 
         action_prompt += "\nPlease provide explicit EXECUTE commands to perform these actions."
         return action_prompt
+
+    def add_to_context(self, role: str, content: str) -> None:
+        """
+        Add an entry to the context history.
+        
+        Args:
+            role: The role of the entry ('user', 'assistant', 'tool_call', 'tool_result', etc.)
+            content: The content of the entry
+        """
+        # Check if context is a list (old style) or dictionary (new style)
+        if isinstance(self.context, list):
+            self.context.append({"role": role, "content": content})
+        elif isinstance(self.context, dict):
+            if not 'history' in self.context:
+                self.context['history'] = []
+            self.context['history'].append({"role": role, "content": content})
+        else:
+            # Create a new list if neither
+            self.context = [{"role": role, "content": content}]
+
+    @property
+    def ghidra(self):
+        """Property for backward compatibility with code referencing bridge.ghidra."""
+        return self.ghidra_client
+
+    def execute_goal(self, goal: str) -> Tuple[bool, List[str]]:
+        """
+        Execute a goal by breaking it down into steps and executing each step.
+        
+        Args:
+            goal: The goal to execute
+            
+        Returns:
+            Tuple of (success, results)
+        """
+        logging.info(f"Executing goal: {goal}")
+        self.context["goal"] = goal
+        all_results = []
+        step_count = 0
+        self.goal_achieved = False
+
+        # Use CAG manager to enhance context with knowledge and session data
+        if self.enable_cag and self.cag_manager:
+            # Update session cache with current context
+            self.cag_manager.update_session_from_bridge_context(self.context)
+        
+        logging.info("Starting planning phase")
+        planning_prompt = self._build_planning_prompt(goal)
+        planning_response = self.chat_engine.query(planning_prompt)
+        logging.info(f"Received planning response: {planning_response[:100]}...")
+        
+        # Extract tools from the plan
+        planned_tools = self._extract_planned_tools(planning_response)
+        logging.info(f"Extracted {len(planned_tools)} planned tools from plan")
+        
+        # Add the plan to context
+        self.add_to_context("plan", planning_response)
+        
+        logging.info("Planning phase completed")
+        logging.info("Starting execution phase")
+        
+        while step_count < self.max_goal_steps and not self.goal_achieved:
+            step_count += 1
+            logging.info(f"Step {step_count}/{self.max_goal_steps}: Sending query to Ollama")
+            
+            # Generate prompt based on current context
+            prompt = self._build_execution_prompt()
+            
+            # Get response from Ollama
+            response = self.chat_engine.query(prompt)
+            logging.info(f"Received response from Ollama: {response[:100]}...")
+            
+            # Update context with the response
+            self.add_to_context("execution_response", response)
+            
+            # Process commands in the response
+            commands = self.command_parser.extract_commands(response)
+            
+            if self.is_goal_achieved(response):
+                logging.info("Goal achievement indicated in response")
+                self.goal_achieved = True
+                all_results.append(f"Step {step_count} - Goal achievement indicated: {response}")
+                break
+                
+            # Execute commands
+            execution_result = ""
+            for cmd_name, cmd_params in commands:
+                try:
+                    # Add tool call to context
+                    tool_call = f"EXECUTE: {cmd_name}({', '.join([f'{k}=\"{v}\"' for k, v in cmd_params.items()])})"
+                    self.add_to_context("tool_call", tool_call)
+                    
+                    # Execute command
+                    result = self.execute_command(cmd_name, cmd_params)
+                    
+                    # Format result for display
+                    formatted_result = self.command_parser.format_command_results(cmd_name, cmd_params, result)
+                    logging.info(f"Command executed: {cmd_name}")
+                    logging.info(f"Result: {formatted_result[:100]}...")
+                    
+                    # Add result to context
+                    self.add_to_context("tool_result", formatted_result)
+                    
+                    execution_result = formatted_result
+                    all_results.append(f"Command: {cmd_name}\nResult: {execution_result}\n")
+                
+                except Exception as e:
+                    error_msg = f"ERROR: {str(e)}"
+                    logging.error(f"Error executing {cmd_name}: {error_msg}")
+                    execution_result = error_msg
+                    self.add_to_context("tool_error", error_msg)
+                    all_results.append(f"Error executing {cmd_name}: {error_msg}")
+            
+            # If no commands found, end the execution phase
+            if not commands:
+                logging.info("No commands found in AI response, ending tool execution loop")
+                all_results.append(f"Step {step_count} - No tool calls: {response}")
+                break
+        
+        if step_count >= self.max_goal_steps:
+            logging.info(f"Reached maximum steps ({self.max_goal_steps}), ending tool execution loop")
+            all_results.append(f"Reached maximum steps ({self.max_goal_steps})")
+            
+        logging.info("Execution phase completed")
+        
+        # Only do review if requested
+        if self.enable_review:
+            all_results.append("\n=== REVIEW PHASE ===\n")
+            all_results.extend(self._perform_review_phase())
+            
+        return self.goal_achieved, all_results
+
+    def _build_execution_prompt(self) -> str:
+        """
+        Build a prompt for the execution phase.
+        
+        Returns:
+            The prompt string
+        """
+        # Include context, goal, and any previous interactions
+        prompt = self._build_structured_prompt(phase="execution") 
+        
+        # Add function call best practices
+        if hasattr(config, 'FUNCTION_CALL_BEST_PRACTICES') and config.FUNCTION_CALL_BEST_PRACTICES:
+            prompt += f"\n\nFunction call best practices:\n{config.FUNCTION_CALL_BEST_PRACTICES}\n"
+            
+        return prompt
+
+    def _build_planning_prompt(self, goal: str) -> str:
+        """
+        Build a prompt for the planning phase.
+        
+        Args:
+            goal: The goal to plan for
+            
+        Returns:
+            The prompt string
+        """
+        # Base system message
+        prompt = self._build_structured_prompt(phase="planning") + f"\nGoal: {goal}\n"
+        
+        # Add function call best practices
+        if hasattr(config, 'FUNCTION_CALL_BEST_PRACTICES') and config.FUNCTION_CALL_BEST_PRACTICES:
+            prompt += f"\n\nFunction call best practices:\n{config.FUNCTION_CALL_BEST_PRACTICES}\n"
+            
+        return prompt
+        
+    def _build_review_prompt(self) -> str:
+        """
+        Build a prompt for the review phase.
+        
+        Returns:
+            The prompt string
+        """
+        prompt = self._build_structured_prompt(phase="review")
+        
+        # Add function call best practices
+        if hasattr(config, 'FUNCTION_CALL_BEST_PRACTICES') and config.FUNCTION_CALL_BEST_PRACTICES:
+            prompt += f"\n\nFunction call best practices:\n{config.FUNCTION_CALL_BEST_PRACTICES}\n"
+        
+        return prompt
 
 def main():
     """Main entry point for the bridge application."""

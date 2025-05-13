@@ -24,6 +24,40 @@ class CommandParser:
         (r'```json\s*\{\s*"tool"\s*:\s*"([\w_]+)"\s*,\s*"parameters"\s*:\s*\{(.*?)\}\s*\}\s*```', 'JSON tool format')
     ]
     
+    # Define the required parameters for each command
+    REQUIRED_PARAMETERS = {
+        "decompile_function": ["name"],
+        "decompile_function_by_address": ["address"],
+        "rename_function": ["old_name", "new_name"],
+        "rename_function_by_address": ["address", "new_name"],
+        "search_functions_by_name": ["query"],
+    }
+    
+    @staticmethod
+    def validate_command_parameters(command_name: str, params: Dict[str, str]) -> Tuple[bool, str]:
+        """
+        Validate that a command has all required parameters.
+        
+        Args:
+            command_name: The name of the command
+            params: The parameters dictionary
+            
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        if command_name not in CommandParser.REQUIRED_PARAMETERS:
+            return True, ""  # No required parameters defined for this command
+            
+        required_params = CommandParser.REQUIRED_PARAMETERS[command_name]
+        missing_params = [param for param in required_params if param not in params]
+        
+        if missing_params:
+            missing_list = ", ".join(missing_params)
+            error_message = f"Missing required parameter(s): {missing_list} for command '{command_name}'"
+            return False, error_message
+            
+        return True, ""
+    
     @staticmethod
     def extract_commands(response: str) -> List[Tuple[str, Dict[str, str]]]:
         """
@@ -46,6 +80,12 @@ class CommandParser:
             
             # Parse parameters
             params = CommandParser._parse_parameters(params_text)
+            
+            # Validate the command has all required parameters
+            is_valid, error_message = CommandParser.validate_command_parameters(command_name, params)
+            if not is_valid:
+                logger.warning(error_message)
+                # We'll still append the command, and the Bridge will handle the error
             
             # Validate and transform parameters for specific commands
             params = CommandParser._validate_and_transform_params(command_name, params)
@@ -75,6 +115,11 @@ class CommandParser:
                     # Log the incorrect format
                     logger.warning(f"Found command using incorrect format ({format_name}): {command_name}")
                     logger.warning(f"Commands should use format: EXECUTE: command_name(param1=\"value1\")")
+                    
+                    # Validate the command has all required parameters
+                    is_valid, error_message = CommandParser.validate_command_parameters(command_name, params)
+                    if not is_valid:
+                        logger.warning(error_message)
                     
                     # Try to validate and transform the parameters
                     params = CommandParser._validate_and_transform_params(command_name, params)
