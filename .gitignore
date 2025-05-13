@@ -35,3 +35,7 @@ knowledge_base/*
 
 # Ignore all files in the Session directory
 Session/*
+
+# Session cache files
+ghidra_session_cache/
+*.log
