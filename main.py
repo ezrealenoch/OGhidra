@@ -48,7 +48,7 @@ def run_interactive_mode(bridge, config):
     while True:
         # Get user input
         try:
-            user_input = input("Query (or 'exit', 'quit', 'health', 'models'): ")
+            user_input = input("Query (or 'exit', 'quit', 'health', 'models', 'vector-store'): ")
         except (KeyboardInterrupt, EOFError):
             print("\nExiting...")
             break
@@ -64,6 +64,78 @@ def run_interactive_mode(bridge, config):
             print(f"Ollama API: {'OK' if ollama_health else 'NOT OK'}")
             print(f"GhidraMCP API: {'OK' if ghidra_health else 'NOT OK'}")
             print("====================\n")
+            
+            # Display vector store information if CAG is enabled
+            if bridge.enable_cag and bridge.cag_manager:
+                print("\n=== Vector Store Information ===")
+                # Get vector store info from bridge
+                try:
+                    vector_store_enabled = config.session_history.use_vector_embeddings if hasattr(config, 'session_history') else False
+                    print(f"Vector embeddings: {'Enabled ✅' if vector_store_enabled else 'Disabled ❌'}")
+                    
+                    if vector_store_enabled and hasattr(bridge, 'memory_manager') and bridge.memory_manager is not None:
+                        mm = bridge.memory_manager
+                        if mm.vector_store:
+                            vector_count = mm.vector_store.vectors.shape[0] if (hasattr(mm.vector_store, 'vectors') and 
+                                                                           mm.vector_store.vectors is not None) else 0
+                            print(f"Vectors available: {'Yes ✅' if vector_count > 0 else 'No ❌'}")
+                            print(f"Vector count: {vector_count}")
+                            
+                            if vector_count > 0:
+                                print(f"Vector dimension: {mm.vector_store.vectors.shape[1]}")
+                                # Calculate mean norm
+                                import numpy as np
+                                norms = np.linalg.norm(mm.vector_store.vectors, axis=1)
+                                print(f"Mean vector norm: {float(np.mean(norms)):.4f}")
+                                
+                                # Show session IDs if available
+                                if hasattr(mm.vector_store, 'get_session_ids'):
+                                    session_ids = mm.vector_store.get_session_ids()
+                                    if session_ids:
+                                        print(f"\nStored Session IDs ({len(session_ids)}):")
+                                        for i, sid in enumerate(session_ids[:5]):  # Show first 5
+                                            print(f"  {i+1}. {sid}")
+                                        if len(session_ids) > 5:
+                                            print(f"  ... and {len(session_ids) - 5} more")
+                except Exception as e:
+                    print(f"Error displaying vector store info: {e}")
+                
+                print("===============================\n")
+            continue
+        elif user_input.lower() == 'vector-store':
+            # Add dedicated command for vector store inspection
+            print("\n=== Vector Store Information ===")
+            # Get vector store info from bridge
+            try:
+                vector_store_enabled = config.session_history.use_vector_embeddings if hasattr(config, 'session_history') else False
+                print(f"Vector embeddings: {'Enabled ✅' if vector_store_enabled else 'Disabled ❌'}")
+                
+                if vector_store_enabled and hasattr(bridge, 'memory_manager') and bridge.memory_manager is not None:
+                    mm = bridge.memory_manager
+                    if mm.vector_store:
+                        vector_count = mm.vector_store.vectors.shape[0] if (hasattr(mm.vector_store, 'vectors') and 
+                                                                       mm.vector_store.vectors is not None) else 0
+                        print(f"Vectors available: {'Yes ✅' if vector_count > 0 else 'No ❌'}")
+                        print(f"Vector count: {vector_count}")
+                        
+                        if vector_count > 0:
+                            print(f"Vector dimension: {mm.vector_store.vectors.shape[1]}")
+                            # Calculate mean norm
+                            import numpy as np
+                            norms = np.linalg.norm(mm.vector_store.vectors, axis=1)
+                            print(f"Mean vector norm: {float(np.mean(norms)):.4f}")
+                            
+                            # Show session IDs if available
+                            if hasattr(mm.vector_store, 'get_session_ids'):
+                                session_ids = mm.vector_store.get_session_ids()
+                                if session_ids:
+                                    print(f"\nStored Session IDs ({len(session_ids)}):")
+                                    for i, sid in enumerate(session_ids):
+                                        print(f"  {i+1}. {sid}")
+            except Exception as e:
+                print(f"Error displaying vector store info: {e}")
+            
+            print("===============================\n")
             continue
         elif user_input.lower() == 'models':
             # List available models
@@ -79,9 +151,10 @@ def run_interactive_mode(bridge, config):
             if bridge.enable_cag and bridge.cag_manager:
                 info = bridge.cag_manager.get_debug_info()
                 print("\n=== CAG Status ===")
-                print(f"CAG Enabled: {info['knowledge_cache_enabled']}")
-                print(f"Knowledge Cache: {str(info['knowledge_cache'])}")
-                print(f"Session Cache: {str(info['session_cache'])}")
+                print(f"CAG Enabled: {info['enabled']}")
+                print(f"Knowledge Cache Enabled: {info['knowledge_cache_enabled']}")
+                print(f"Session Cache Enabled: {info['session_cache_enabled']}")
+                print(f"Token Limit: {info['token_limit']}")
                 print("=================\n")
             else:
                 print("\nCAG is disabled. Enable it with CAG_ENABLED=true in your .env file.\n")
