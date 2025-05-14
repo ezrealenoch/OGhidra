@@ -207,8 +207,154 @@ def process_interactive_command(command, config, memory_manager):
         print("mistral:7b")
         print("======================\n")
         return True
-    
-    # Memory-specific commands
+    elif command == 'tools':
+        # Display all available Ghidra tools and their parameters
+        print("\n=== Available Ghidra Tools ===")
+        
+        # Import the tools from config
+        try:
+            from src.ghidra_client import GhidraMCPClient
+            
+            # Create a temporary client instance to get its methods
+            client = GhidraMCPClient(config.ghidra)
+            
+            # Get all public methods (excluding those starting with _)
+            tools = [name for name in dir(client) if not name.startswith('_') and callable(getattr(client, name))]
+            
+            # Count the tools and provide a summary
+            print(f"Found {len(tools)} available tools:\n")
+            
+            for tool_name in sorted(tools):
+                tool_func = getattr(client, tool_name)
+                # Get parameter info from function signature
+                import inspect
+                signature = inspect.signature(tool_func)
+                params = []
+                for param_name, param in signature.parameters.items():
+                    if param_name != 'self':  # Skip the 'self' parameter
+                        if param.default is inspect.Parameter.empty:
+                            params.append(f"{param_name} (required)")
+                        else:
+                            default_val = param.default
+                            if default_val is None:
+                                default_val = "None"
+                            params.append(f"{param_name}={default_val}")
+                
+                # Get docstring if available
+                doc = tool_func.__doc__.strip().split('\n')[0] if tool_func.__doc__ else "No description available"
+                
+                print(f"  {tool_name}({', '.join(params)})")
+                print(f"    {doc}")
+                print()
+                
+        except Exception as e:
+            print(f"Error loading tools: {str(e)}")
+            print(f"Debugging details:")
+            print(f"  Exception type: {type(e).__name__}")
+            print(f"  Exception traceback:")
+            import traceback
+            traceback.print_exc()
+            
+        print("===========================\n")
+        return True
+    elif command.startswith('run-tool '):
+        # Execute a specific tool directly
+        tool_str = command[9:].strip()  # Remove 'run-tool ' prefix
+        
+        try:
+            # Parse the tool name and parameters
+            if '(' not in tool_str or ')' not in tool_str:
+                print("Invalid format. Use: run-tool tool_name(param1='value1', param2='value2')")
+                return True
+                
+            tool_name = tool_str[:tool_str.find('(')].strip()
+            params_str = tool_str[tool_str.find('(')+1:tool_str.rfind(')')].strip()
+            
+            # Parse parameters (simple version, could be enhanced)
+            params = {}
+            if params_str:
+                param_pairs = params_str.split(',')
+                for pair in param_pairs:
+                    if '=' in pair:
+                        key, value = pair.split('=', 1)
+                        key = key.strip()
+                        value = value.strip()
+                        
+                        # Remove quotes if present
+                        if (value.startswith('"') and value.endswith('"')) or \
+                           (value.startswith("'") and value.endswith("'")):
+                            value = value[1:-1]
+                            
+                        params[key] = value
+            
+            # Import the client and execute the tool
+            from src.ghidra_client import GhidraMCPClient
+            client = GhidraMCPClient(config.ghidra)
+            
+            if hasattr(client, tool_name) and callable(getattr(client, tool_name)):
+                tool_func = getattr(client, tool_name)
+                print(f"\nExecuting: {tool_name}({', '.join([f'{k}=\"{v}\"' for k, v in params.items()])})")
+                result = tool_func(**params)
+                
+                print("\n============================================================")
+                print(f"Results from {tool_name}:")
+                print("============================================================")
+                
+                if isinstance(result, list):
+                    for i, item in enumerate(result):
+                        print(f"  {i+1}. {item}")
+                    print(f"Total: {len(result)} items")
+                else:
+                    print(result)
+                print("============================================================\n")
+            else:
+                print(f"Unknown tool: {tool_name}")
+        except Exception as e:
+            print(f"Error executing tool: {str(e)}")
+            
+        return True
+    elif command == 'analyze-function' or command.startswith('analyze-function '):
+        # Shortcut command to analyze a function
+        try:
+            from src.ghidra_client import GhidraMCPClient
+            client = GhidraMCPClient(config.ghidra)
+            
+            # Extract address if provided (e.g., "analyze-function 140001000")
+            address = None
+            if command.startswith('analyze-function '):
+                address = command[16:].strip()
+                if not address:
+                    address = None
+            
+            print(f"\nExecuting: analyze_function({f'address=\"{address}\"' if address else ''})")
+            result = client.analyze_function(address)
+            
+            print("\n============================================================")
+            print(f"Results from analyze_function:")
+            print("============================================================")
+            print(result)
+            print("============================================================\n")
+        except Exception as e:
+            print(f"Error analyzing function: {str(e)}")
+            
+        return True
+    elif command == 'help':
+        print("\n=== Available Commands ===")
+        print("exit, quit - Exit the application")
+        print("health - Check API health")
+        print("vector-store - Display detailed vector store information")
+        print("models - List available models")
+        print("tools - List all available Ghidra tools with parameters")
+        print("run-tool - Execute a specific tool (e.g., run-tool analyze_function(address=\"1400011a8\"))")
+        print("analyze-function [address] - Analyze current function or specified address")
+        print("memory-health - Run detailed memory system health check")
+        print("memory-stats - Display memory usage statistics")
+        print("memory-clear - Clear all session memory")
+        print("memory-vectors-on - Enable vector embeddings for RAG")
+        print("memory-vectors-off - Disable vector embeddings")
+        print("help - Display this help message")
+        print("=========================\n")
+        return True
     elif command in ['memory-health', 'memory-check']:
         print("Running detailed memory system health check...")
         run_health_check(config, memory_manager)
@@ -235,25 +381,9 @@ def process_interactive_command(command, config, memory_manager):
         toggle_vector_embeddings(config, False)
         # Reload memory manager to apply changes
         return True
-    elif command == 'help':
-        print("\n=== Available Commands ===")
-        print("exit, quit - Exit the application")
-        print("health - Check API health")
-        print("vector-store - Display detailed vector store information")
-        print("models - List available models")
-        print("memory-health - Run detailed memory system health check")
-        print("memory-stats - Display memory usage statistics")
-        print("memory-clear - Clear all session memory")
-        print("memory-vectors-on - Enable vector embeddings for RAG")
-        print("memory-vectors-off - Disable vector embeddings")
-        print("help - Display this help message")
-        print("=========================\n")
-        return True
     else:
-        # This would be where your regular query processing happens
-        # For this implementation, we're just handling the new memory commands
-        # Your existing query processing would likely be here
-        print(f"Processing query: {command}")
+        # For non-special commands, indicate that we should process it as a regular query
+        # The interactive_mode function will handle the actual processing with the bridge
         return True
 
 def interactive_mode(config):
@@ -263,6 +393,9 @@ def interactive_mode(config):
     Args:
         config: The BridgeConfig instance.
     """
+    # Import bridge here to avoid circular imports
+    from src.bridge import Bridge
+    
     # Initialize memory manager
     memory_manager = MemoryManager(config)
     
@@ -282,9 +415,48 @@ def interactive_mode(config):
 
     while True:
         try:
-            command = input("\nQuery (or 'exit', 'quit', 'help', 'health', 'vector-store'): ")
-            if not process_interactive_command(command, config, memory_manager):
-                break
+            command = input("\nQuery (or 'exit', 'quit', 'help', 'health', 'tools', 'models', 'vector-store', etc.): ")
+            
+            # Check if this is a special command that should be handled by process_interactive_command
+            special_commands = ['exit', 'quit', 'help', 'health', 'vector-store', 'models', 'tools', 
+                               'memory-health', 'memory-check', 'memory-stats', 'memory-clear', 
+                               'memory-vectors-on', 'memory-vectors-off']
+            
+            # Also consider commands that start with specific prefixes
+            command_prefixes = ['run-tool', 'analyze-function']
+            
+            # Check if command matches any special command or prefix
+            is_special_command = (command.strip().lower() in special_commands or
+                                 any(command.strip().lower().startswith(prefix) for prefix in command_prefixes))
+            
+            if is_special_command:
+                if not process_interactive_command(command, config, memory_manager):
+                    break
+            else:
+                # Handle as a regular query to be processed by the bridge
+                print(f"Processing query: {command}")
+                
+                # Initialize the bridge with the current config
+                try:
+                    bridge = Bridge(
+                        config=config,
+                        include_capabilities=True,
+                        max_agent_steps=config.max_steps
+                    )
+                except TypeError as e:
+                    # Handle case where Bridge constructor parameters have changed
+                    print(f"Error initializing Bridge: {e}")
+                    print("Trying fallback initialization...")
+                    bridge = Bridge(config=config)
+                
+                # Process the query using the bridge
+                try:
+                    response = bridge.process_query(command)
+                    print("\nResponse:")
+                    print(response)
+                except Exception as e:
+                    print(f"Error processing query with bridge: {e}")
+                
         except KeyboardInterrupt:
             print("\nExiting interactive mode.")
             break
@@ -295,8 +467,22 @@ def main():
     """Main entry point."""
     args = parse_args()
     
-    # Load configuration
-    config = BridgeConfig.from_env()
+    # Set log level from arguments or environment
+    if args.log_level:
+        os.environ["LOG_LEVEL"] = args.log_level
+        
+    # Configure based on arguments and environment variables
+    config = BridgeConfig.from_env() # Load defaults and other env vars first
+    
+    # Override with command line arguments
+    if args.ollama_url:
+        config.ollama.base_url = args.ollama_url
+    if args.ghidra_url:
+        config.ghidra.base_url = args.ghidra_url
+    if args.model:
+        config.ollama.model = args.model
+    if args.mock:
+        config.ghidra.mock_mode = True
     
     # Override configuration from command-line arguments
     if args.enable_vector_embeddings:
@@ -340,6 +526,16 @@ def main():
         run_health_check(config, memory_manager)
         return
     
+    # Initialize the bridge (ensure this uses the potentially updated config)
+    bridge = Bridge(
+        config=config,
+        include_capabilities=args.include_capabilities,
+        max_agent_steps=config.max_steps # This should now use the value from .env via config
+    )
+    
+    # Health check for Ollama and GhidraMCP
+    # ... rest of the main() function ...
+
     # Start the main application
     start_bridge(config, memory_manager)
 

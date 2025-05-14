@@ -48,7 +48,7 @@ def run_interactive_mode(bridge, config):
     while True:
         # Get user input
         try:
-            user_input = input("Query (or 'exit', 'quit', 'health', 'models', 'vector-store'): ")
+            user_input = input("Query (or 'exit', 'quit', 'help', 'health', 'tools', 'models', 'vector-store'): ")
         except (KeyboardInterrupt, EOFError):
             print("\nExiting...")
             break
@@ -146,6 +146,56 @@ def run_interactive_mode(bridge, config):
                 print(f"- {model}")
             print("========================\n")
             continue
+        elif user_input.lower() == 'tools':
+            # Display all available Ghidra tools and their parameters
+            print("\n=== Available Ghidra Tools ===")
+            
+            # Import the necessary classes
+            try:
+                from src.ghidra_client import GhidraMCPClient
+                
+                # Create a temporary client instance to get its methods
+                client = bridge.ghidra if hasattr(bridge, 'ghidra') else GhidraMCPClient(config.ghidra)
+                
+                # Get all public methods (excluding those starting with _)
+                tools = [name for name in dir(client) if not name.startswith('_') and callable(getattr(client, name))]
+                
+                # Count the tools and provide a summary
+                print(f"Found {len(tools)} available tools:\n")
+                
+                for tool_name in sorted(tools):
+                    tool_func = getattr(client, tool_name)
+                    # Get parameter info from function signature
+                    import inspect
+                    signature = inspect.signature(tool_func)
+                    params = []
+                    for param_name, param in signature.parameters.items():
+                        if param_name != 'self':  # Skip the 'self' parameter
+                            if param.default is inspect.Parameter.empty:
+                                params.append(f"{param_name} (required)")
+                            else:
+                                default_val = param.default
+                                if default_val is None:
+                                    default_val = "None"
+                                params.append(f"{param_name}={default_val}")
+                    
+                    # Get docstring if available
+                    doc = tool_func.__doc__.strip().split('\n')[0] if tool_func.__doc__ else "No description available"
+                    
+                    print(f"  {tool_name}({', '.join(params)})")
+                    print(f"    {doc}")
+                    print()
+                    
+            except Exception as e:
+                print(f"Error loading tools: {str(e)}")
+                print(f"Debugging details:")
+                print(f"  Exception type: {type(e).__name__}")
+                print(f"  Exception traceback:")
+                import traceback
+                traceback.print_exc()
+                
+            print("===========================\n")
+            continue
         elif user_input.lower() == 'cag':
             # Show CAG status
             if bridge.enable_cag and bridge.cag_manager:
@@ -158,6 +208,96 @@ def run_interactive_mode(bridge, config):
                 print("=================\n")
             else:
                 print("\nCAG is disabled. Enable it with CAG_ENABLED=true in your .env file.\n")
+            continue
+        elif user_input.lower() == 'help':
+            print("\n=== Available Commands ===")
+            print("exit, quit - Exit the application")
+            print("health - Check API health")
+            print("vector-store - Display detailed vector store information")
+            print("models - List available models")
+            print("tools - List all available Ghidra tools with parameters")
+            print("run-tool tool_name(param1='value1', param2='value2') - Execute a specific Ghidra tool directly")
+            print("analyze-function [address] - Analyze current function or specified address")
+            print("cag - Display Context-Aware Generation status")
+            print("help - Display this help message")
+            print("=========================\n")
+            continue
+        elif user_input.lower().startswith('run-tool '):
+            # Execute a specific tool directly
+            tool_str = user_input[9:].strip()  # Remove 'run-tool ' prefix
+            
+            try:
+                # Parse the tool name and parameters
+                if '(' not in tool_str or ')' not in tool_str:
+                    print("Invalid format. Use: run-tool tool_name(param1='value1', param2='value2')")
+                    continue
+                    
+                tool_name = tool_str[:tool_str.find('(')].strip()
+                params_str = tool_str[tool_str.find('(')+1:tool_str.rfind(')')].strip()
+                
+                # Parse parameters (simple version, could be enhanced)
+                params = {}
+                if params_str:
+                    param_pairs = params_str.split(',')
+                    for pair in param_pairs:
+                        if '=' in pair:
+                            key, value = pair.split('=', 1)
+                            key = key.strip()
+                            value = value.strip()
+                            
+                            # Remove quotes if present
+                            if (value.startswith('"') and value.endswith('"')) or \
+                               (value.startswith("'") and value.endswith("'")):
+                                value = value[1:-1]
+                                
+                            params[key] = value
+                
+                # Get the client
+                client = bridge.ghidra
+                
+                if hasattr(client, tool_name) and callable(getattr(client, tool_name)):
+                    tool_func = getattr(client, tool_name)
+                    print(f"\nExecuting: {tool_name}({', '.join([f'{k}=\"{v}\"' for k, v in params.items()])})")
+                    result = tool_func(**params)
+                    
+                    print("\n============================================================")
+                    print(f"Results from {tool_name}:")
+                    print("============================================================")
+                    
+                    if isinstance(result, list):
+                        for i, item in enumerate(result):
+                            print(f"  {i+1}. {item}")
+                        print(f"Total: {len(result)} items")
+                    else:
+                        print(result)
+                    print("============================================================\n")
+                else:
+                    print(f"Unknown tool: {tool_name}")
+            except Exception as e:
+                print(f"Error executing tool: {str(e)}")
+                
+            continue
+        elif user_input.lower() == 'analyze-function' or user_input.lower().startswith('analyze-function '):
+            # Shortcut command to analyze a function
+            try:
+                # Extract address if provided (e.g., "analyze-function 140001000")
+                address = None
+                if user_input.lower().startswith('analyze-function '):
+                    address = user_input[16:].strip()
+                    if not address:
+                        address = None
+                
+                print(f"\nExecuting: analyze_function({f'address=\"{address}\"' if address else ''})")
+                result = bridge.ghidra.analyze_function(address)
+                
+                print("\n============================================================")
+                print(f"Results from analyze_function:")
+                print("============================================================")
+                print(result)
+                print("============================================================\n")
+            except Exception as e:
+                print(f"Error analyzing function: {str(e)}")
+                
             continue
         elif not user_input.strip():
             continue
