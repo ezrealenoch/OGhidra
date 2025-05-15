@@ -201,6 +201,18 @@ class OllamaConfig:
         }
     ])
     
+    # Best practices for function calls
+    FUNCTION_CALL_BEST_PRACTICES = """# COMMON ERRORS TO AVOID:
+# ✓ DO use snake_case for function names and parameter names (e.g., decompile_function, old_name).
+# ✓ Parameter 'address' for tools like decompile_function_by_address and rename_function_by_address refers to the numerical memory address.
+# ✓ DO NOT use the "FUN_" prefix when providing an address to tools expecting a numerical address (e.g., use address="14024DA90", not address="FUN_14024DA90").
+# ✓ DO NOT use "0x" prefix when providing an address (e.g., use address="14024DA90", not address="0x14024DA90").
+# ✓ DO ensure a function exists (e.g., via list_functions or search_functions_by_name) before trying to decompile or rename it by name.
+# ✓ For decompile_function (by name), use the full function name (e.g., name="FUN_14024DA90", or name="main").
+# ✓ For decompile_function_by_address, use the numerical address (e.g., address="14024DA90").
+# ✓ Be precise with tool selection: decompile_function is for names, decompile_function_by_address is for numerical addresses.
+"""
+    
     # System prompt for each phase
     planning_system_prompt: str = """
     You are a Planning Assistant for Ghidra reverse engineering tasks.
@@ -217,6 +229,7 @@ class OllamaConfig:
     - list_imports(offset, limit): List imported symbols, showing external dependencies.
     - list_exports(offset, limit): List exported symbols, showing the program's public interface.
     - list_segments(offset, limit): List memory segments, providing information about memory layout.
+    - list_strings(offset, limit): List all strings in the program with pagination.
     - search_functions_by_name(query, offset, limit): Search for functions by a name substring.
     - get_current_function(): Gets the function (name and address) at the current cursor position in Ghidra.
     - get_current_address(): Gets the address at the current cursor position in Ghidra.
@@ -244,10 +257,10 @@ class OllamaConfig:
     TOOL: analyze_function PARAMS: address="14001050"
 
     IMPORTANT: Only create the plan. Do not generate explanatory text before "PLAN:" or after the tool calls. Focus solely on constructing the tool execution sequence.
-    If the user asks for something not directly supported by a tool (e.g., "find all calls to function X" or "list all strings"), plan steps that would help gather relevant information (e.g., decompile related functions, search for function names that might handle strings). Do NOT invent tools.
+    If the user asks for something not directly supported by a tool (e.g., "find all calls to function X"), plan steps that would help gather relevant information (e.g., decompile related functions, search for function names that might handle strings). Do NOT invent tools.
     """
     
-    execution_system_prompt: str = """
+    execution_system_prompt: str = f"""
     You are a Tool Execution Assistant for Ghidra reverse engineering tasks.
     Your SOLE task is to help the user achieve their goal by selecting and proposing the execution of EXACTLY ONE Ghidra tool from the list below.
 
@@ -266,6 +279,7 @@ class OllamaConfig:
     - list_imports(offset=0, limit=50)
     - list_exports(offset=0, limit=50)
     - list_segments(offset=0, limit=20)
+    - list_strings(offset=0, limit=100)
     - search_functions_by_name(query="main", offset=0, limit=20)
     - get_current_function()
     - get_current_address()
@@ -300,7 +314,7 @@ class OllamaConfig:
 
     IMPORTANT RULES TO FOLLOW:
     1. ONLY use tool names and parameter names EXACTLY as they appear in the AVAILABLE TOOLS list.
-    2. If a tool is not in the list, you CANNOT use it. Do not invent or assume tools (e.g., for Xrefs or string listing, as they are not in the list).
+    2. If a tool is not in the list, you CANNOT use it. Do not invent or assume tools (e.g., for Xrefs, as it is not in the list).
     3. ALWAYS include ALL required parameters for the chosen tool.
     4. String values for parameters MUST be in double quotes.
     5. Numerical values for parameters (e.g., offset, limit) should NOT be in quotes.
@@ -308,20 +322,9 @@ class OllamaConfig:
     7. If the user's query cannot be directly addressed by any single operation from the AVAILABLE TOOLS list (e.g., "find all callers of function X", "list all strings in the binary"), and you have executed all relevant preliminary tools (like listing imports/exports/functions), respond with "GOAL ACHIEVED" to indicate you cannot proceed further with the current toolset for that specific complex request.
     8. Output ONLY the EXECUTE line or "GOAL ACHIEVED". No other text, explanation, or conversational filler.
     9. When the user requests general function analysis or wants to understand what a function does, use analyze_function() (with or without an address as appropriate).
-    """
-    
-    # Best practices for function calls
-    FUNCTION_CALL_BEST_PRACTICES = """
-    # COMMON ERRORS TO AVOID:
-    # ✓ DO use snake_case for function names and parameter names (e.g., decompile_function, old_name).
-    # ✓ Parameter 'address' for tools like decompile_function_by_address and rename_function_by_address refers to the numerical memory address.
-    # ✓ DO NOT use the "FUN_" prefix when providing an address to tools expecting a numerical address (e.g., use address="14024DA90", not address="FUN_14024DA90").
-    # ✓ DO NOT use "0x" prefix when providing an address (e.g., use address="14024DA90", not address="0x14024DA90").
-    # ✓ DO ensure a function exists (e.g., via list_functions or search_functions_by_name) before trying to decompile or rename it by name.
-    # ✓ For decompile_function (by name), use the full function name (e.g., name="FUN_14024DA90", or name="main").
-    # ✓ For decompile_function_by_address, use the numerical address (e.g., address="14024DA90").
-    # ✓ Be precise with tool selection: decompile_function is for names, decompile_function_by_address is for numerical addresses.
-    """
+
+    {FUNCTION_CALL_BEST_PRACTICES}
+"""
     
     evaluation_system_prompt: str = """
     You are a Goal Evaluation Assistant for Ghidra reverse engineering tasks.
