@@ -26,13 +26,11 @@ class GhidraMCPClient:
         """
         self.config = config
         self.client = httpx.Client(timeout=config.timeout)
-        self.mock_mode = config.mock_mode
         self.api_version = None
         logger.info(f"Initialized GhidraMCP client at: {config.base_url}")
         
         # Try to detect API version and available endpoints
-        if not self.mock_mode:
-            self._detect_api()
+        self._detect_api()
     
     def _detect_api(self):
         """Detect the API version and available endpoints."""
@@ -57,9 +55,6 @@ class GhidraMCPClient:
         Returns:
             List of response lines
         """
-        if self.mock_mode:
-            return self._mock_response_list(endpoint, params)
-        
         if params is None:
             params = {}
             
@@ -90,9 +85,6 @@ class GhidraMCPClient:
         Returns:
             Response text
         """
-        if self.mock_mode:
-            return self._mock_response_str(endpoint, data)
-            
         url = f"{self.config.base_url}/{endpoint}"
         
         try:
@@ -114,89 +106,6 @@ class GhidraMCPClient:
             logger.error(error_msg)
             return error_msg
     
-    def _mock_response_list(self, endpoint: str, params: Dict[str, Any] = None) -> List[str]:
-        """Generate a mock list response."""
-        logger.info(f"MOCK MODE: GET {endpoint} with params {params}")
-        time.sleep(0.5)  # Simulate network delay
-        
-        if endpoint == "methods":
-            return [
-                "main",
-                "initialize",
-                "process_data",
-                "cleanup"
-            ]
-        elif endpoint == "classes":
-            return [
-                "MainClass",
-                "DataProcessor",
-                "Logger"
-            ]
-        elif endpoint == "segments":
-            return [
-                ".text: 0x1000-0x5000 (rx)",
-                ".data: 0x6000-0x7000 (rw)",
-                ".rdata: 0x8000-0x9000 (r)"
-            ]
-        elif endpoint == "imports":
-            return [
-                "printf (msvcrt.dll)",
-                "malloc (msvcrt.dll)",
-                "free (msvcrt.dll)"
-            ]
-        elif endpoint == "exports":
-            return [
-                "DllMain (0x2000)",
-                "ProcessData (0x2100)"
-            ]
-        elif endpoint == "list_functions":
-            return [
-                "main (0x1000)",
-                "initialize (0x1100)",
-                "process_data (0x1200)",
-                "cleanup (0x1300)"
-            ]
-        elif endpoint == "disassemble_function":
-            address = params.get("address", "unknown")
-            return [
-                f"{address}:      push    rbp",
-                f"{address}+0x1:  mov     rbp, rsp",
-                f"{address}+0x4:  sub     rsp, 0x20",
-                f"{address}+0x8:  call    printf",
-                f"{address}+0xd:  add     rsp, 0x20",
-                f"{address}+0x11: pop     rbp",
-                f"{address}+0x12: ret"
-            ]
-        elif endpoint == "get_function_by_address":
-            address = params.get("address", "unknown")
-            return [f"function_{address} at {address}"]
-        else:
-            return [f"Mock response for {endpoint}"]
-    
-    def _mock_response_str(self, endpoint: str, data: Dict[str, Any] | str) -> str:
-        """Generate a mock string response."""
-        logger.info(f"MOCK MODE: POST {endpoint} with data {data}")
-        time.sleep(0.5)  # Simulate network delay
-        
-        if endpoint == "decompile":
-            name = data if isinstance(data, str) else "unknown"
-            return f"// Decompiled function: {name}\nvoid {name}() {{\n    // Mock decompiled code\n    int local_var = 0;\n    printf(\"Hello from function\");\n    return;\n}}"
-        elif endpoint == "renameFunction":
-            old_name = data.get("oldName", "unknown") if isinstance(data, dict) else "unknown"
-            new_name = data.get("newName", "unknown") if isinstance(data, dict) else "unknown"
-            return f"Renamed function from {old_name} to {new_name}"
-        elif endpoint == "renameData":
-            address = data.get("address", "unknown") if isinstance(data, dict) else "unknown"
-            new_name = data.get("newName", "unknown") if isinstance(data, dict) else "unknown"
-            return f"Renamed data at {address} to {new_name}"
-        elif endpoint == "renameVariable":
-            function_name = data.get("functionName", "unknown") if isinstance(data, dict) else "unknown"
-            old_name = data.get("oldName", "unknown") if isinstance(data, dict) else "unknown"
-            new_name = data.get("newName", "unknown") if isinstance(data, dict) else "unknown"
-            return f"Renamed variable from {old_name} to {new_name} in function {function_name}"
-        else:
-            return f"Mock response for {endpoint}"
-    
     def health_check(self) -> bool:
         """
         Check if the GhidraMCP server is available.
@@ -204,9 +113,6 @@ class GhidraMCPClient:
         Returns:
             True if the server is available, False otherwise
         """
-        if self.mock_mode:
-            return True
-            
         try:
             response = self.safe_get("methods", {"offset": 0, "limit": 1})
             return response and not response[0].startswith("Error")
@@ -361,6 +267,19 @@ class GhidraMCPClient:
         """
         return self.safe_get("data", {"offset": offset, "limit": limit})
     
+    def list_strings(self, offset: int = 0, limit: int = 100) -> List[str]:
+        """
+        List all strings in the program with pagination.
+        
+        Args:
+            offset: Offset to start from
+            limit: Maximum number of results
+            
+        Returns:
+            List of strings
+        """
+        return self.safe_get("strings", {"offset": offset, "limit": limit})
+    
     def search_functions_by_name(self, query: str, offset: int = 0, limit: int = 100) -> List[str]:
         """
         Search for functions whose name contains the given substring.
@@ -461,15 +380,46 @@ class GhidraMCPClient:
         Returns:
             Comprehensive function analysis including decompiled code and referenced functions
         """
-        # If no address provided, get current function
         if address is None:
-            current_function_info = self.get_current_function()
-            # Extract address from current function result
-            # Expected format is something like "FunctionName @ Address"
-            if "@ " in current_function_info:
-                address = current_function_info.split("@ ")[1].strip()
+            determined_address = None
+            # Try with get_current_function() first
+            current_function_info = self.get_current_function() # Expected: "FunctionName @ Address" or error string
+            
+            if not current_function_info.startswith("Error"):
+                if "@ " in current_function_info:
+                    parts = current_function_info.split("@ ", 1)
+                    if len(parts) == 2:
+                        potential_address = parts[1].strip()
+                        # Validate if the extracted address is a non-empty hex string
+                        if potential_address and all(c in "0123456789abcdefABCDEF" for c in potential_address):
+                            determined_address = potential_address
+                            logger.info(f"analyze_function: Determined address '{determined_address}' from get_current_function() result: '{current_function_info}'.")
+                        else:
+                            logger.warning(f"analyze_function: Extracted part '{potential_address}' from get_current_function() result ('{current_function_info}') is not a valid hex address.")
+                    else:
+                        # This case should ideally not be reached if "@ " is present and split is limited to 1
+                        logger.warning(f"analyze_function: Unexpected split result from get_current_function() ('{current_function_info}') despite '@ ' being present.")
+                else:
+                    logger.warning(f"analyze_function: Result from get_current_function() ('{current_function_info}') does not contain '@ '. Attempting get_current_address().")
             else:
-                return "Error: Could not determine current function address. Please provide an address."
+                logger.warning(f"analyze_function: get_current_function() returned an error: '{current_function_info}'. Attempting get_current_address().")
+
+            # If get_current_function() didn't yield a valid address, try get_current_address()
+            if determined_address is None:
+                logger.info("analyze_function: Trying get_current_address() as fallback to determine function address.")
+                current_address_str = self.get_current_address() # Expected: "Address" or error string
+                # Validate if current_address_str is a non-empty hex string and not an error
+                if not current_address_str.startswith("Error") and current_address_str and all(c in "0123456789abcdefABCDEF" for c in current_address_str):
+                    determined_address = current_address_str
+                    logger.info(f"analyze_function: Determined address '{determined_address}' from get_current_address().")
+                else:
+                    logger.warning(f"analyze_function: get_current_address() did not yield a valid hex address. Result: '{current_address_str}'")
+            
+            if determined_address:
+                address = determined_address
+            else:
+                logger.error("analyze_function: Could not determine current function address automatically after trying get_current_function() and get_current_address().")
+                return "Error: Could not determine current function address. Please provide an address or ensure a function/address is selected in Ghidra."
         
         # Get the decompiled code for the target function
         decompiled_code = self.decompile_function_by_address(address)
@@ -477,28 +427,20 @@ class GhidraMCPClient:
             return f"Error analyzing function at {address}: {decompiled_code}"
             
         # Extract function calls from the decompiled code
-        # This is a basic implementation - in real code you would use more sophisticated parsing
         function_calls = []
         for line in decompiled_code.splitlines():
-            # Look for patterns like: function_name(...), FUN_address(...), etc.
-            # This regex looks for words followed by opening parenthesis
             matches = re.finditer(r'\b(\w+)\s*\(', line)
             for match in matches:
                 func_name = match.group(1)
-                # Filter out common C functions and keywords
                 if func_name not in ["if", "while", "for", "switch", "return", "sizeof"]:
                     function_calls.append(func_name)
         
-        # Make function_calls unique
         function_calls = list(set(function_calls))
         
-        # Prepare the result
         result = [f"=== ANALYSIS OF FUNCTION AT {address} ===", "", decompiled_code, "", "=== REFERENCED FUNCTIONS ===", ""]
         
-        # Decompile and add each referenced function
         for func_name in function_calls:
             try:
-                # Try to decompile by name first
                 func_code = self.decompile_function(func_name)
                 if not func_code.startswith("Error"):
                     result.append(f"--- Function: {func_name} ---")

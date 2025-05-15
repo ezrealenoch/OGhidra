@@ -46,9 +46,25 @@ class CommandParser:
         "list_imports",
         "list_exports",
         "list_segments",
+        "list_strings",
         "get_current_function",
         "get_current_address",
-        "analyze_function"
+        "analyze_function",
+        "list_data_items",
+        "list_namespaces",
+        "get_function_by_address",
+        "rename_data",
+        "disassemble_function",
+        "health_check",
+        "check_health"
+        # Disabled tools:
+        # "rename_variable",
+        # "safe_get", 
+        # "safe_post",
+        # "set_decompiler_comment",
+        # "set_disassembly_comment",
+        # "set_function_prototype",
+        # "set_local_variable_type"
     ]
     
     @staticmethod

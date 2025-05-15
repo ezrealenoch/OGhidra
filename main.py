@@ -6,6 +6,7 @@ Main entry point for the Ollama-GhidraMCP Bridge application.
 import os
 import sys
 import argparse
+import json
 from dotenv import load_dotenv
 
 # Load environment variables from .env file if present
@@ -48,7 +49,7 @@ def run_interactive_mode(bridge, config):
     while True:
         # Get user input
         try:
-            user_input = input("Query (or 'exit', 'quit', 'help', 'health', 'tools', 'models', 'vector-store'): ")
+            user_input = input("Query (or 'exit', 'help', 'health', 'tools', 'models', 'vector-store'): ")
         except (KeyboardInterrupt, EOFError):
             print("\nExiting...")
             break
@@ -227,55 +228,109 @@ def run_interactive_mode(bridge, config):
             tool_str = user_input[9:].strip()  # Remove 'run-tool ' prefix
             
             try:
-                # Parse the tool name and parameters
                 if '(' not in tool_str or ')' not in tool_str:
-                    print("Invalid format. Use: run-tool tool_name(param1='value1', param2='value2')")
+                    print("\nInvalid format. Use: run-tool tool_name(param1='value1', param2='value2')\n")
                     continue
                     
                 tool_name = tool_str[:tool_str.find('(')].strip()
-                params_str = tool_str[tool_str.find('(')+1:tool_str.rfind(')')].strip()
+                raw_params_str = tool_str[tool_str.find('(')+1:tool_str.rfind(')')].strip() # Keep raw for display
                 
-                # Parse parameters (simple version, could be enhanced)
                 params = {}
-                if params_str:
-                    param_pairs = params_str.split(',')
+                if raw_params_str:
+                    param_pairs = raw_params_str.split(',')
                     for pair in param_pairs:
                         if '=' in pair:
-                            key, value = pair.split('=', 1)
+                            key, value_str_full = pair.split('=', 1)
                             key = key.strip()
-                            value = value.strip()
+                            value_str_from_pair = value_str_full.strip() # Renamed to avoid conflict
                             
-                            # Remove quotes if present
-                            if (value.startswith('"') and value.endswith('"')) or \
-                               (value.startswith("'") and value.endswith("'")):
-                                value = value[1:-1]
-                                
-                            params[key] = value
+                            # Handle quotes first
+                            if (value_str_from_pair.startswith("'") and value_str_from_pair.endswith("'")) or \
+                               (value_str_from_pair.startswith('"') and value_str_from_pair.endswith('"')):
+                                final_value_for_param = value_str_from_pair[1:-1]
+                            else:
+                                final_value_for_param = value_str_from_pair
+
+                            # Type conversion
+                            if final_value_for_param.lower() == "true":
+                                params[key] = True
+                            elif final_value_for_param.lower() == "false":
+                                params[key] = False
+                            elif final_value_for_param.lower() == "none":
+                                params[key] = None
+                            elif key in ("offset", "limit"): # Known integer parameters
+                                try:
+                                    params[key] = int(final_value_for_param)
+                                except ValueError:
+                                    bridge.logger.warning(f"Could not parse value '{final_value_for_param}' for int parameter '{key}'. Using as string.")
+                                    params[key] = final_value_for_param # Fallback to string
+                            else:
+                                # Default to string (covers 'address', 'name', 'query', etc.)
+                                params[key] = final_value_for_param
                 
-                # Get the client
-                client = bridge.ghidra
-                
-                if hasattr(client, tool_name) and callable(getattr(client, tool_name)):
-                    tool_func = getattr(client, tool_name)
-                    print(f"\nExecuting: {tool_name}({', '.join([f'{k}=\"{v}\"' for k, v in params.items()])})")
-                    result = tool_func(**params)
+                if hasattr(bridge.ghidra, tool_name):
+                    tool_method = getattr(bridge.ghidra, tool_name)
                     
-                    print("\n============================================================")
-                    print(f"Results from {tool_name}:")
-                    print("============================================================")
-                    
-                    if isinstance(result, list):
-                        for i, item in enumerate(result):
-                            print(f"  {i+1}. {item}")
-                        print(f"Total: {len(result)} items")
+                    bridge.logger.info(f"Executing direct tool call via 'run-tool': {tool_name} with params: {params}")
+                    raw_tool_result = tool_method(**params)
+
+                    if tool_name == "analyze_function":
+                        is_error = isinstance(raw_tool_result, str) and raw_tool_result.lower().startswith("error:")
+                        
+                        if not is_error:
+                            # Prepare formatted_tool_data first
+                            formatted_tool_data = ""
+                            if isinstance(raw_tool_result, dict) or isinstance(raw_tool_result, list):
+                                try:
+                                    formatted_tool_data = json.dumps(raw_tool_result, indent=2)
+                                except TypeError:
+                                    formatted_tool_data = str(raw_tool_result)
+                            else:
+                                formatted_tool_data = str(raw_tool_result)
+                            
+                            # Print the raw data before sending to AI
+                            print("\n=== Raw Output from analyze_function (to be sent to AI) ===\n")
+                            print(formatted_tool_data)
+                            print("\n===========================================================\n")
+
+                            print(f"\nSending output from {tool_name} to AI for analysis...\n") # Adjusted message timing
+
+                            analysis_prompt = (
+                                f"The Ghidra tool '{tool_name}' was executed (parameters: {params}). "
+                                f"Its output is below. Based *only* on this provided data:\\n"
+                                f"1. Identify the primary function being analyzed (name and address).\n"
+                                f"2. Summarize its apparent purpose or main actions based on decompiled code snippets and called functions.\n"
+                                f"3. List any notable cross-references (calls to other functions, or data references) mentioned in the output.\n"
+                                f"4. Point out any immediate observations a reverse engineer might find interesting (e.g., unusual patterns, specific API calls, complex loops).\n"
+                                f"Tool Output:\\n```json\\n{formatted_tool_data}\\n```"
+                            )
+                            try:
+                                ai_analysis = bridge.ollama.generate(prompt=analysis_prompt)
+                                # DEBUG line
+                                bridge.logger.info(f"AI analysis received snippet: '{str(ai_analysis)[:100]}...'") 
+                                print(f"DEBUG: AI Response Type: {type(ai_analysis)}, Is None: {ai_analysis is None}, Is Empty Str: {ai_analysis == ''}, Length: {len(str(ai_analysis)) if ai_analysis is not None else 0}")
+
+                                print("\n=== AI Analysis of Function Output ===\n")
+                                if ai_analysis and str(ai_analysis).strip():
+                                    print(str(ai_analysis)) # Ensure printing as string
+                                else:
+                                    print("[AI did not provide a response or the response was empty.]")
+                                    print(f"Raw tool output was:\n{formatted_tool_data}\n")
+                                print("\n=====================================\n")
+                            except Exception as e_ai:
+                                bridge.logger.error(f"Error getting AI analysis for {tool_name}: {e_ai}", exc_info=True)
+                                print(f"\nError getting AI analysis for {tool_name}: {type(e_ai).__name__} - {e_ai}\n")
+                                print(f"Raw tool output was:\n{formatted_tool_data}\n")
+                        else:
+                            print(f"\nResult of {tool_name}({raw_params_str}):\n{raw_tool_result}\n")
                     else:
-                        print(result)
-                    print("============================================================\n")
+                        print(f"\nResult of {tool_name}({raw_params_str}):\n{raw_tool_result}\n")
                 else:
-                    print(f"Unknown tool: {tool_name}")
+                    print(f"\nError: Tool '{tool_name}' not found in Ghidra client.\n")
+            
             except Exception as e:
-                print(f"Error executing tool: {str(e)}")
-                
+                bridge.logger.error(f"Error processing 'run-tool' command '{tool_str}': {e}", exc_info=True)
+                print(f"\nError processing 'run-tool' command '{tool_str}': {type(e).__name__} - {e}\n")
             continue
         elif user_input.lower() == 'analyze-function' or user_input.lower().startswith('analyze-function '):
             # Shortcut command to analyze a function

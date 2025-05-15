@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """
-Test script for the Extended GhidraMCP API.
-Tests the full implementation that supports all function signatures.
+Test script for the GhidraMCP API to verify the communication endpoints
+used by our AI agent. This script is focused on understanding which endpoints
+actually work and how they should be properly called.
 """
 
 import json
 import requests
+import argparse
+import sys
+import traceback
+import inspect
+import os
 from typing import Dict, List, Any, Optional
 import logging
 
@@ -16,33 +22,32 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class ExtendedGhidraMCPTester:
+class GhidraMCPTester:
     def __init__(self, base_url: str = "http://localhost:8080"):
-        """Initialize the tester with the extended API server."""
+        """Initialize the tester with the GhidraMCP server URL."""
         self.base_url = base_url
+        self.available_functions = []
+        self.available_addresses = []
         
-    def test_api_documentation(self) -> Dict[str, Any]:
-        """Test the root endpoint for API documentation."""
-        try:
-            response = requests.get(f"{self.base_url}/")
-            response.raise_for_status()
-            return {
-                "success": True,
-                "data": response.json(),
-                "type": "object",
-                "description": "API documentation with list of endpoints"
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    def test_get_methods(self) -> Dict[str, Any]:
-        """Test /methods endpoint to get all function names."""
+    def test_methods(self) -> Dict[str, Any]:
+        """Test the /methods endpoint which returns available functions."""
         try:
             response = requests.get(f"{self.base_url}/methods")
             response.raise_for_status()
             
             # Response is a text list of method names, one per line
             methods = response.text.strip().split('\n')
+            self.available_functions = methods
+            
+            # Try to extract addresses from function names (assuming format like FUN_140001030)
+            for method in methods:
+                if '_' in method:
+                    try:
+                        address = method.split('_')[1]
+                        if all(c in '0123456789abcdefABCDEF' for c in address):
+                            self.available_addresses.append(address)
+                    except:
+                        pass
             
             return {
                 "success": True,
@@ -52,366 +57,183 @@ class ExtendedGhidraMCPTester:
             }
         except Exception as e:
             return {"success": False, "error": str(e)}
-    
-    def test_decompile_function(self) -> Dict[str, Any]:
-        """Test decompile_function endpoint."""
-        try:
-            # First get a list of methods to test with
-            methods = self.test_get_methods()
-            if not methods.get("success"):
-                return {"success": False, "error": "Could not get method list"}
-            
-            # Use the first method for testing
-            test_function = methods["data"][0] if methods["data"] else "FUN_140001000"
-            
-            response = requests.get(
-                f"{self.base_url}/method/{test_function}"
-            )
-            response.raise_for_status()
-            return {
-                "success": True,
-                "data": response.text,
-                "type": "string",
-                "description": "Returns decompiled C-like code as a string"
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    def test_decompile_function_by_address(self) -> Dict[str, Any]:
-        """Test decompile_function_by_address endpoint."""
-        try:
-            # First get a function address to test with
-            methods = self.test_get_methods()
-            if not methods.get("success"):
-                return {"success": False, "error": "Could not get method list"}
-            
-            # Extract address from function name (assuming format like FUN_140001030)
-            test_function = methods["data"][0] if methods["data"] else "FUN_140001000"
-            test_address = test_function.split('_')[1] if '_' in test_function else "140001000"
-            
-            response = requests.get(
-                f"{self.base_url}/address/{test_address}"
-            )
-            response.raise_for_status()
-            return {
-                "success": True,
-                "data": response.text,
-                "type": "string",
-                "description": "Returns decompiled C-like code as a string"
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    def test_rename_function(self) -> Dict[str, Any]:
-        """Test rename_function endpoint."""
-        try:
-            # First get a list of methods to test with
-            methods = self.test_get_methods()
-            if not methods.get("success"):
-                return {"success": False, "error": "Could not get method list"}
-            
-            # Use the first method for testing
-            test_function = methods["data"][0] if methods["data"] else "FUN_140001000"
-            new_name = f"{test_function}_renamed"
-            
-            response = requests.post(
-                f"{self.base_url}/rename",
-                json={
-                    "old_name": test_function,
-                    "new_name": new_name
-                }
-            )
-            response.raise_for_status()
-            
-            # Rename it back to keep our test data clean
-            requests.post(
-                f"{self.base_url}/rename",
-                json={
-                    "old_name": new_name,
-                    "new_name": test_function
-                }
-            )
-            
-            return {
-                "success": True,
-                "data": response.json(),
-                "type": "object",
-                "description": "Returns success message"
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    def test_rename_function_by_address(self) -> Dict[str, Any]:
-        """Test rename_function_by_address endpoint."""
-        try:
-            # First get a function address to test with
-            methods = self.test_get_methods()
-            if not methods.get("success"):
-                return {"success": False, "error": "Could not get method list"}
-            
-            # Extract address from function name (assuming format like FUN_140001030)
-            test_function = methods["data"][0] if methods["data"] else "FUN_140001000"
-            test_address = test_function.split('_')[1] if '_' in test_function else "140001000"
-            new_name = f"func_{test_address}_renamed"
-            
-            response = requests.post(
-                f"{self.base_url}/rename",
-                json={
-                    "function_address": test_address,
-                    "new_name": new_name
-                }
-            )
-            response.raise_for_status()
-            
-            # Rename it back to keep our test data clean
-            requests.post(
-                f"{self.base_url}/rename",
-                json={
-                    "old_name": new_name,
-                    "new_name": test_function
-                }
-            )
-            
-            return {
-                "success": True,
-                "data": response.json(),
-                "type": "object",
-                "description": "Returns success message"
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    def test_list_functions(self) -> Dict[str, Any]:
-        """Test list_functions endpoint."""
-        try:
-            response = requests.get(f"{self.base_url}/functions")
-            response.raise_for_status()
-            return {
-                "success": True,
-                "data": response.json(),
-                "type": "string[]",
-                "description": "Returns array of function names"
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    def test_search_functions_by_name(self) -> Dict[str, Any]:
-        """Test search_functions_by_name endpoint."""
-        try:
-            response = requests.get(
-                f"{self.base_url}/functions/search",
-                params={
-                    "query": "FUN",
-                    "offset": 0,
-                    "limit": 10
-                }
-            )
-            response.raise_for_status()
-            return {
-                "success": True,
-                "data": response.json(),
-                "type": "string[]",
-                "description": "Returns array of matching function names"
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    def test_list_imports(self) -> Dict[str, Any]:
-        """Test list_imports endpoint."""
-        try:
-            response = requests.get(
-                f"{self.base_url}/imports",
-                params={"offset": 0, "limit": 10}
-            )
-            response.raise_for_status()
-            return {
-                "success": True,
-                "data": response.json(),
-                "type": "string[]",
-                "description": "Returns array of imported symbol names"
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    def test_list_exports(self) -> Dict[str, Any]:
-        """Test list_exports endpoint."""
-        try:
-            response = requests.get(
-                f"{self.base_url}/exports",
-                params={"offset": 0, "limit": 10}
-            )
-            response.raise_for_status()
-            return {
-                "success": True,
-                "data": response.json(),
-                "type": "string[]",
-                "description": "Returns array of exported symbol names"
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    def test_list_segments(self) -> Dict[str, Any]:
-        """Test list_segments endpoint."""
-        try:
-            response = requests.get(
-                f"{self.base_url}/segments",
-                params={"offset": 0, "limit": 10}
-            )
-            response.raise_for_status()
-            return {
-                "success": True,
-                "data": response.json(),
-                "type": "string[]",
-                "description": "Returns array of segment information"
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    def test_get_current_function(self) -> Dict[str, Any]:
-        """Test get_current_function endpoint."""
-        try:
-            response = requests.get(f"{self.base_url}/current/function")
-            response.raise_for_status()
-            return {
-                "success": True,
-                "data": response.json(),
-                "type": "string",
-                "description": "Returns current function name and address"
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    def test_get_current_address(self) -> Dict[str, Any]:
-        """Test get_current_address endpoint."""
-        try:
-            response = requests.get(f"{self.base_url}/current/address")
-            response.raise_for_status()
-            return {
-                "success": True,
-                "data": response.json(),
-                "type": "string",
-                "description": "Returns current address"
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    def test_get_bytes(self) -> Dict[str, Any]:
-        """Test get_bytes endpoint."""
-        try:
-            # First get a function address to test with
-            methods = self.test_get_methods()
-            if not methods.get("success"):
-                return {"success": False, "error": "Could not get method list"}
-            
-            # Extract address from function name (assuming format like FUN_140001030)
-            test_function = methods["data"][0] if methods["data"] else "FUN_140001000"
-            test_address = test_function.split('_')[1] if '_' in test_function else "140001000"
-            
-            response = requests.get(
-                f"{self.base_url}/bytes/{test_address}/16"
-            )
-            response.raise_for_status()
-            return {
-                "success": True,
-                "data": response.text,
-                "type": "string",
-                "description": "Returns raw bytes at a specific address"
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    def test_get_labels(self) -> Dict[str, Any]:
-        """Test get_labels endpoint."""
-        try:
-            response = requests.get(f"{self.base_url}/labels")
-            response.raise_for_status()
-            return {
-                "success": True,
-                "data": response.text,
-                "type": "string",
-                "description": "Returns all labels in the program"
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    def test_get_structures(self) -> Dict[str, Any]:
-        """Test get_structures endpoint."""
-        try:
-            response = requests.get(f"{self.base_url}/structures")
-            response.raise_for_status()
-            return {
-                "success": True,
-                "data": response.text,
-                "type": "string",
-                "description": "Returns data structures information"
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    def run_all_tests(self):
-        """Run all function tests and print results."""
-        test_functions = {
-            "api_documentation": self.test_api_documentation,
-            "get_methods": self.test_get_methods,
-            "decompile_function": self.test_decompile_function,
-            "decompile_function_by_address": self.test_decompile_function_by_address,
-            "rename_function": self.test_rename_function,
-            "rename_function_by_address": self.test_rename_function_by_address,
-            "list_functions": self.test_list_functions,
-            "search_functions_by_name": self.test_search_functions_by_name,
-            "list_imports": self.test_list_imports,
-            "list_exports": self.test_list_exports,
-            "list_segments": self.test_list_segments,
-            "get_current_function": self.test_get_current_function,
-            "get_current_address": self.test_get_current_address,
-            "get_bytes": self.test_get_bytes,
-            "get_labels": self.test_get_labels,
-            "get_structures": self.test_get_structures
-        }
 
-        print("\n=== Extended GhidraMCP API Tests ===\n")
+    def test_direct_tool_call(self, tool_name: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Test calling a tool directly, simulating how the Bridge class would call it.
         
-        successful_tests = 0
-        failed_tests = 0
+        Args:
+            tool_name: The name of the tool to call
+            params: The parameters to pass to the tool
+            
+        Returns:
+            Dictionary with the result
+        """
+        if params is None:
+            params = {}
+            
+        try:
+            # Try to import the GhidraMCPClient directly to see how it calls methods
+            sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+            from src.ghidra_client import GhidraMCPClient
+            from src.config import GhidraMCPConfig
+            
+            # Create a config
+            config = GhidraMCPConfig()
+            config.base_url = self.base_url
+            
+            # Create a client instance
+            client = GhidraMCPClient(config)
+            
+            # Check if the tool exists
+            if not hasattr(client, tool_name):
+                return {
+                    "success": False,
+                    "error": f"Tool {tool_name} does not exist in GhidraMCPClient"
+                }
+                
+            # Get the tool function
+            tool_func = getattr(client, tool_name)
+            
+            # Get the function signature for better error messages
+            sig = inspect.signature(tool_func)
+            
+            # Call the tool
+            result = tool_func(**params)
+            
+            # Format the result
+            if isinstance(result, list):
+                display_result = result[:5] if len(result) > 5 else result
+                if len(result) > 5:
+                    display_result.append("... truncated ...")
+            else:
+                display_result = result
+                
+            return {
+                "success": True,
+                "data": result,
+                "display_data": display_result,
+                "type": type(result).__name__,
+                "description": f"Direct call to {tool_name} with params {params}",
+                "signature": str(sig)
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }
+    
+    def run_tests(self, specific_tools=None):
+        """
+        Run tests for either specific tools or a pre-defined set of common tools.
         
-        for func_name, test_func in test_functions.items():
-            print(f"\nTesting {func_name}...")
-            result = test_func()
+        Args:
+            specific_tools: Optional list of specific tools to test
+            
+        Returns:
+            Dictionary of test results
+        """
+        # First get methods to populate available functions and addresses
+        methods_result = self.test_methods()
+        results = {"methods": methods_result}
+        
+        print(f"\n=== Methods Test ===")
+        if methods_result["success"]:
+            print(f"✅ Success: Found {len(self.available_functions)} functions")
+            print(f"Sample functions: {self.available_functions[:5]}")
+        else:
+            print(f"❌ Failed: {methods_result['error']}")
+            return results  # Exit early if methods test fails
+        
+        # Define tools to test (either from parameter or default list)
+        test_tools = []
+        if specific_tools:
+            test_tools = specific_tools
+        else:
+            # Default tools to test - these should cover most functionality
+            test_tools = [
+                {"name": "list_methods", "params": {"offset": 0, "limit": 10}},
+                {"name": "get_current_function", "params": {}},
+                {"name": "list_functions", "params": {}}
+            ]
+            
+            # Add a test with the first available address if we have one
+            if self.available_addresses:
+                addr = self.available_addresses[0]
+                test_tools.append({"name": "decompile_function_by_address", "params": {"address": addr}})
+                
+            # Add a test with the first available function if we have one
+            if self.available_functions:
+                func = self.available_functions[0]
+                test_tools.append({"name": "decompile_function", "params": {"name": func}})
+                
+        # Run tests for each tool
+        for tool in test_tools:
+            tool_name = tool["name"] if isinstance(tool, dict) else tool
+            params = tool.get("params", {}) if isinstance(tool, dict) else {}
+            
+            print(f"\n=== Testing {tool_name} ===")
+            print(f"Parameters: {params}")
+            
+            result = self.test_direct_tool_call(tool_name, params)
+            results[tool_name] = result
             
             if result["success"]:
-                successful_tests += 1
                 print(f"✅ Success")
-                print(f"Return type: {result['type']}")
-                print(f"Description: {result['description']}")
-                if isinstance(result['data'], list):
-                    sample_data = result['data'][:3] if result['data'] else '[]'
-                    print(f"Sample data: {sample_data}")
-                elif isinstance(result['data'], dict):
-                    try:
-                        keys = list(result['data'].keys())[:3]
-                        sample_data = {k: result['data'][k] for k in keys}
-                        print(f"Sample data: {sample_data}")
-                    except:
-                        print(f"Sample data: {str(result['data'])[:100]}")
-                else:
-                    data_sample = str(result['data'])[:100]
-                    print(f"Sample data: {data_sample}..." if len(data_sample) >= 100 else f"Sample data: {data_sample}")
+                print(f"Return Type: {result['type']}")
+                print(f"Function Signature: {result.get('signature', 'unknown')}")
+                print(f"Sample Data: {json.dumps(result.get('display_data', 'No data'), indent=2)[:200]}")
             else:
-                failed_tests += 1
                 print(f"❌ Failed: {result['error']}")
+                if "traceback" in result:
+                    tb_lines = result["traceback"].split("\n")
+                    # Print the last 5 lines of the traceback
+                    print("Traceback summary:")
+                    for line in tb_lines[-5:]:
+                        print(f"  {line}")
             
             print("-" * 50)
         
-        print(f"\nTest Summary:")
-        print(f"✅ Successful tests: {successful_tests}")
-        print(f"❌ Failed tests: {failed_tests}")
-        print(f"Total tests: {successful_tests + failed_tests}")
-        print(f"Success rate: {successful_tests / (successful_tests + failed_tests) * 100:.2f}%")
+        return results
 
 def main():
     """Main entry point."""
-    tester = ExtendedGhidraMCPTester()
-    tester.run_all_tests()
+    parser = argparse.ArgumentParser(description="Test the Ghidra MCP API to understand how tools are called")
+    parser.add_argument("--url", default="http://localhost:8080", help="URL of the Ghidra MCP server")
+    parser.add_argument("--tool", action="append", help="Specific tool(s) to test")
+    parser.add_argument("--param", action="append", help="Parameters for the tool(s) in key=value format")
+    parser.add_argument("--json", action="store_true", help="Output results in JSON format")
+    args = parser.parse_args()
+    
+    tester = GhidraMCPTester(args.url)
+    
+    # If specific tools were specified, parse them and their parameters
+    specific_tools = None
+    if args.tool:
+        specific_tools = []
+        params_dict = {}
+        
+        # Parse parameters if provided
+        if args.param:
+            for param in args.param:
+                if "=" in param:
+                    key, value = param.split("=", 1)
+                    params_dict[key.strip()] = value.strip()
+        
+        # Create tool entries
+        for tool_name in args.tool:
+            specific_tools.append({
+                "name": tool_name,
+                "params": params_dict
+            })
+    
+    # Run tests
+    results = tester.run_tests(specific_tools)
+    
+    # Output as JSON if requested
+    if args.json:
+        print(json.dumps(results, indent=2))
 
 if __name__ == "__main__":
     main() 
