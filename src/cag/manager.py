@@ -257,7 +257,8 @@ class CAGManager:
             workplan_files = [
                 "workplans/knowledge_capture.md", 
                 "workplans/progressive_analysis.md",
-                "workplans/ghidra_tasks.md"  # Add the new workplan
+                "workplans/ghidra_tasks.md",  # Add the new workplan
+                "workplans/malware_analysis_triage.md" # Added new malware triage workplan
             ]
             
             for file_path in workplan_files:

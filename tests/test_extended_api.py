@@ -17,7 +17,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class ExtendedGhidraMCPTester:
-    def __init__(self, base_url: str = "http://localhost:8081"):
+    def __init__(self, base_url: str = "http://localhost:8080"):
         """Initialize the tester with the extended API server."""
         self.base_url = base_url
         

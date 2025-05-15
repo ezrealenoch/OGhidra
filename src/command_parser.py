@@ -33,6 +33,24 @@ class CommandParser:
         "search_functions_by_name": ["query"],
     }
     
+    # List of all supported commands for validation purposes
+    ALL_SUPPORTED_COMMANDS = [
+        "decompile_function",
+        "decompile_function_by_address",
+        "rename_function",
+        "rename_function_by_address",
+        "search_functions_by_name",
+        "list_methods",
+        "list_classes", 
+        "list_functions",
+        "list_imports",
+        "list_exports",
+        "list_segments",
+        "get_current_function",
+        "get_current_address",
+        "analyze_function"
+    ]
+    
     @staticmethod
     def validate_command_parameters(command_name: str, params: Dict[str, str]) -> Tuple[bool, str]:
         """

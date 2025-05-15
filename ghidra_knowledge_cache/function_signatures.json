@@ -32,6 +32,25 @@
       ],
       "token_count": 104
     },
+    "analyze_function": {
+      "name": "analyze_function",
+      "description": "Provides comprehensive analysis of a function including its decompiled code and all functions it calls. If no address is provided, analyzes the current function.",
+      "parameters": {
+        "address": "The address of the function to analyze (optional, e.g., '14001000')"
+      },
+      "return_type": "string",
+      "common_locations": [
+        "Binary analysis",
+        "Function understanding",
+        "Malware analysis"
+      ],
+      "related_functions": [
+        "decompile_function",
+        "decompile_function_by_address",
+        "get_current_function"
+      ],
+      "token_count": 130
+    },
     "rename_function": {
       "name": "rename_function",
       "description": "Renames a function from its current name to a new name. This helps with code readability and understanding program semantics.",
@@ -53,7 +72,7 @@
       "name": "rename_function_by_address",
       "description": "Renames a function at the specified address to a new name. IMPORTANT: Use numerical addresses only, not function names.",
       "parameters": {
-        "function_address": "The address of the function to rename (numerical only, e.g., '14001000')",
+        "address": "The address of the function to rename (numerical only, e.g., '14001000')",
         "new_name": "New function name"
       },
       "return_type": "string",

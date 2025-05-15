@@ -5,6 +5,7 @@ Client for interacting with the GhidraMCP API.
 import json
 import logging
 import time
+import re
 from typing import Dict, Any, List, Optional
 
 import httpx
@@ -447,6 +448,65 @@ class GhidraMCPClient:
             Decompiled function
         """
         result = self.safe_get("decompile_function", {"address": address})
+        return "\n".join(result)
+    
+    def analyze_function(self, address: str = None) -> str:
+        """
+        Analyze a function, including its decompiled code and all functions it calls.
+        If no address is provided, uses the current function.
+        
+        Args:
+            address: Function address (optional)
+            
+        Returns:
+            Comprehensive function analysis including decompiled code and referenced functions
+        """
+        # If no address provided, get current function
+        if address is None:
+            current_function_info = self.get_current_function()
+            # Extract address from current function result
+            # Expected format is something like "FunctionName @ Address"
+            if "@ " in current_function_info:
+                address = current_function_info.split("@ ")[1].strip()
+            else:
+                return "Error: Could not determine current function address. Please provide an address."
+        
+        # Get the decompiled code for the target function
+        decompiled_code = self.decompile_function_by_address(address)
+        if decompiled_code.startswith("Error"):
+            return f"Error analyzing function at {address}: {decompiled_code}"
+            
+        # Extract function calls from the decompiled code
+        # This is a basic implementation - in real code you would use more sophisticated parsing
+        function_calls = []
+        for line in decompiled_code.splitlines():
+            # Look for patterns like: function_name(...), FUN_address(...), etc.
+            # This regex looks for words followed by opening parenthesis
+            matches = re.finditer(r'\b(\w+)\s*\(', line)
+            for match in matches:
+                func_name = match.group(1)
+                # Filter out common C functions and keywords
+                if func_name not in ["if", "while", "for", "switch", "return", "sizeof"]:
+                    function_calls.append(func_name)
+        
+        # Make function_calls unique
+        function_calls = list(set(function_calls))
+        
+        # Prepare the result
+        result = [f"=== ANALYSIS OF FUNCTION AT {address} ===", "", decompiled_code, "", "=== REFERENCED FUNCTIONS ===", ""]
+        
+        # Decompile and add each referenced function
+        for func_name in function_calls:
+            try:
+                # Try to decompile by name first
+                func_code = self.decompile_function(func_name)
+                if not func_code.startswith("Error"):
+                    result.append(f"--- Function: {func_name} ---")
+                    result.append(func_code)
+                    result.append("")
+            except Exception as e:
+                logger.debug(f"Could not decompile referenced function {func_name}: {e}")
+        
         return "\n".join(result)
     
     def disassemble_function(self, address: str) -> List[str]:

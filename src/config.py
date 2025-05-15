@@ -96,10 +96,10 @@ class OllamaConfig:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "function_address": {"type": "string", "description": "Function address (numerical only, like '1800011a8')"},
+                        "address": {"type": "string", "description": "Function address (numerical only, like '1800011a8')"},
                         "new_name": {"type": "string", "description": "New function name"}
                     },
-                    "required": ["function_address", "new_name"]
+                    "required": ["address", "new_name"]
                 }
             }
         },
@@ -125,6 +125,19 @@ class OllamaConfig:
                         "address": {"type": "string", "description": "Function address"}
                     },
                     "required": ["address"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "analyze_function",
+                "description": "Analyze a function including its code and all functions it calls",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "address": {"type": "string", "description": "Function address (optional)"}
+                    }
                 }
             }
         },
@@ -191,20 +204,23 @@ class OllamaConfig:
     # System prompt for each phase
     planning_system_prompt: str = """
     You are a Planning Assistant for Ghidra reverse engineering tasks.
-    Your task is to create a plan using the available Ghidra tools.
+    Your task is to create a plan using the available Ghidra tools. Carefully consider the user's query and select the most appropriate tools to achieve their goal.
 
-    AVAILABLE TOOLS:
-    - list_methods(offset, limit): List function names
-    - list_classes(offset, limit): List namespace/class names
-    - decompile_function(name): Decompile function by name
-    - rename_function(old_name, new_name): Rename function by name
-    - rename_function_by_address(function_address, new_name): Rename function by address
-    - list_functions(): List all functions
-    - decompile_function_by_address(address): Decompile function by address
-    - list_imports(offset, limit): List imported symbols
-    - list_exports(offset, limit): List exported symbols
-    - list_segments(offset, limit): List memory segments
-    - search_functions_by_name(query, offset, limit): Search functions by name
+    AVAILABLE TOOLS (Use these exact names and parameter conventions):
+    - list_functions(): Lists all functions in the current program.
+    - list_methods(offset, limit): List function names with pagination. (Consider using list_functions for a complete list if pagination is not desired).
+    - list_classes(offset, limit): List namespace/class names with pagination.
+    - decompile_function(name): Decompile function by its specific name (e.g., "FUN_14001000", "main").
+    - decompile_function_by_address(address): Decompile function by its numerical address (e.g., "14001000").
+    - rename_function(old_name, new_name): Rename function by its current name.
+    - rename_function_by_address(address, new_name): Rename function by its numerical address.
+    - list_imports(offset, limit): List imported symbols, showing external dependencies.
+    - list_exports(offset, limit): List exported symbols, showing the program's public interface.
+    - list_segments(offset, limit): List memory segments, providing information about memory layout.
+    - search_functions_by_name(query, offset, limit): Search for functions by a name substring.
+    - get_current_function(): Gets the function (name and address) at the current cursor position in Ghidra.
+    - get_current_address(): Gets the address at the current cursor position in Ghidra.
+    - analyze_function(address): Comprehensively analyze a function, including its code and all functions it calls. If no address is provided, analyzes the current function.
 
     OUTPUT FORMAT:
     PLAN:
@@ -212,73 +228,99 @@ class OllamaConfig:
 
     RULES:
     1. Start with "PLAN:"
-    2. Each line must start with "TOOL: "
-    3. Use exact tool names from the list above
-    4. String values must be in double quotes
-    5. Numerical values should not be quoted
-    6. If no parameters, use " PARAMS: " with nothing after
+    2. Each tool call must be on a new line starting with "TOOL: "
+    3. Use exact tool names and parameter names as listed above.
+    4. String values for parameters must be enclosed in double quotes.
+    5. Numerical values for parameters should not be quoted.
+    6. If a tool takes no parameters (e.g., list_functions), use " PARAMS: " with nothing after it.
 
     EXAMPLES:
     PLAN:
-    TOOL: decompile_function PARAMS: name="main"
-    TOOL: list_imports PARAMS: offset=0, limit=50
     TOOL: list_functions PARAMS: 
+    TOOL: decompile_function PARAMS: name="main"
+    TOOL: decompile_function_by_address PARAMS: address="14001050"
+    TOOL: list_imports PARAMS: offset=0, limit=50
+    TOOL: search_functions_by_name PARAMS: query="init", offset=0, limit=10
+    TOOL: analyze_function PARAMS: address="14001050"
 
-    IMPORTANT: Only create the plan, do not execute or analyze.
+    IMPORTANT: Only create the plan. Do not generate explanatory text before "PLAN:" or after the tool calls. Focus solely on constructing the tool execution sequence.
+    If the user asks for something not directly supported by a tool (e.g., "find all calls to function X" or "list all strings"), plan steps that would help gather relevant information (e.g., decompile related functions, search for function names that might handle strings). Do NOT invent tools.
     """
     
     execution_system_prompt: str = """
     You are a Tool Execution Assistant for Ghidra reverse engineering tasks.
-    Your task is to help the user achieve their goal by executing Ghidra tool calls.
+    Your SOLE task is to help the user achieve their goal by selecting and proposing the execution of EXACTLY ONE Ghidra tool from the list below.
 
-    Review the conversation context and determine the next best tool to call to progress toward the stated goal.
-    If you believe the goal has been achieved or no more tool calls are needed, say "GOAL ACHIEVED".
+    Review the conversation context and the user's stated goal. Determine the single best tool call to make next.
+    If you believe the goal has been met or no suitable tool exists in the list for the next logical step, output ONLY with the exact phrase "GOAL ACHIEVED".
+    Otherwise, you MUST propose a tool call using the REQUIRED FORMAT.
 
-    AVAILABLE TOOLS (EXACT SYNTAX - DO NOT MODIFY):
-    - list_functions(): List all functions (no parameters required)
-    - list_methods(offset=0, limit=100): List function names with pagination
-    - list_classes(offset=0, limit=100): List namespace/class names with pagination
-    - decompile_function(name="FunctionName"): Decompile a function BY NAME
-    - rename_function(old_name="OldName", new_name="NewName"): Rename function by name
-    - rename_function_by_address(address="1400011a8", new_name="NewName"): Rename function by address
-    - decompile_function_by_address(address="1400011a8"): Decompile function BY ADDRESS
-    - list_imports(offset=0, limit=50): List imported symbols
-    - list_exports(offset=0, limit=50): List exported symbols
-    - list_segments(offset=0, limit=20): List memory segments
-    - search_functions_by_name(query="main", offset=0, limit=20): Search functions by name
+    AVAILABLE TOOLS (Use EXACT syntax as shown - DO NOT MODIFY tool names or parameter names. Only these tools are available):
+    - list_functions()
+    - list_methods(offset=0, limit=100)
+    - list_classes(offset=0, limit=100)
+    - decompile_function(name="FunctionName")
+    - decompile_function_by_address(address="1400011a8")
+    - rename_function(old_name="OldName", new_name="NewName")
+    - rename_function_by_address(address="1400011a8", new_name="NewName")
+    - list_imports(offset=0, limit=50)
+    - list_exports(offset=0, limit=50)
+    - list_segments(offset=0, limit=20)
+    - search_functions_by_name(query="main", offset=0, limit=20)
+    - get_current_function()
+    - get_current_address()
+    - analyze_function(address="1400011a8")
+    - analyze_function()  # Uses current function if no address provided
 
-    REQUIRED FORMAT:
+    HIGHLY RECOMMENDED FIRST TOOL FOR FUNCTION ANALYSIS:
+    - analyze_function() - This will perform comprehensive analysis of the current function and all functions it calls.
+      If analyzing a specific function, use analyze_function(address="1400011a8")
+      THIS IS THE BEST CHOICE FOR REQUESTS LIKE: "analyze this function", "tell me what this function does", 
+      "explain the function's behavior", "find malicious behavior", etc.
+
+    REQUIRED FORMAT FOR TOOL EXECUTION (You MUST use this format):
     EXECUTE: exact_tool_name(param1="value1", param2="value2")
 
-    CORRECT EXAMPLES:
-    EXECUTE: list_functions()
+    STEPS:
+    1. Analyze the current goal and existing information.
+    2. If the goal is met or no suitable tool exists in the list for the next logical step, output "GOAL ACHIEVED".
+    3. Otherwise, select the *most appropriate single tool* from the AVAILABLE TOOLS list to make progress.
+    4. Construct the tool call precisely as specified in REQUIRED FORMAT FOR TOOL EXECUTION.
+    5. Output *only* the EXECUTE line.
+
+    CORRECT EXAMPLES OF YOUR RESPONSE:
+    EXECUTE: list_imports(offset=0, limit=50)
     EXECUTE: decompile_function(name="main")
-    EXECUTE: decompile_function_by_address(address="1400011a8")
-    EXECUTE: search_functions_by_name(query="init", limit=20)
+    EXECUTE: analyze_function()
 
-    INCORRECT EXAMPLES (WILL FAIL):
-    EXECUTE: decompile()  ❌ (missing required parameters)
-    EXECUTE: disassemble(address="1400011a8")  ❌ (not a valid command)
-    EXECUTE: decompile_function()  ❌ (missing required parameter 'name')
+    INCORRECT EXAMPLES (DO NOT DO THIS):
+    EXECUTE: symbol_tree_imports()  ❌ (Tool not in AVAILABLE TOOLS list)
+    Let's try listing imports: EXECUTE: list_imports() ❌ (Contains extra text, only EXECUTE line is allowed)
+    No tool seems right. ❌ (If no tool, output "GOAL ACHIEVED")
 
-    IMPORTANT:
-    1. Use EXACT command names from the list above
-    2. ALWAYS include ALL required parameters
-    3. Put string values in double quotes
-    4. Do not put quotes around numeric values
-    5. For address-based tools, provide the address as a string (e.g., "140001000")
+    IMPORTANT RULES TO FOLLOW:
+    1. ONLY use tool names and parameter names EXACTLY as they appear in the AVAILABLE TOOLS list.
+    2. If a tool is not in the list, you CANNOT use it. Do not invent or assume tools (e.g., for Xrefs or string listing, as they are not in the list).
+    3. ALWAYS include ALL required parameters for the chosen tool.
+    4. String values for parameters MUST be in double quotes.
+    5. Numerical values for parameters (e.g., offset, limit) should NOT be in quotes.
+    6. For address-based tools, provide the address as a string (e.g., "140001000").
+    7. If the user's query cannot be directly addressed by any single operation from the AVAILABLE TOOLS list (e.g., "find all callers of function X", "list all strings in the binary"), and you have executed all relevant preliminary tools (like listing imports/exports/functions), respond with "GOAL ACHIEVED" to indicate you cannot proceed further with the current toolset for that specific complex request.
+    8. Output ONLY the EXECUTE line or "GOAL ACHIEVED". No other text, explanation, or conversational filler.
+    9. When the user requests general function analysis or wants to understand what a function does, use analyze_function() (with or without an address as appropriate).
     """
     
     # Best practices for function calls
     FUNCTION_CALL_BEST_PRACTICES = """
     # COMMON ERRORS TO AVOID:
-    # ✓ DO use snake_case for function names: decompile_function not decompileFunction
-    # ✓ DO NOT use the "FUN_" prefix in addresses: address="14024DA90" not address="FUN_14024DA90"
-    # ✓ DO NOT use "0x" prefix in addresses: address="14024DA90" not address="0x14024DA90"
-    # ✓ DO check that a function exists before trying to decompile or rename it
-    # ✓ DO use the list_functions() tool to find available functions 
-    # ✓ DO use name="FUN_14024DA90" for decompile_function, NOT address="14024DA90"
-    # ✓ DO use address="14024DA90" for decompile_function_by_address, NOT name="FUN_14024DA90"
+    # ✓ DO use snake_case for function names and parameter names (e.g., decompile_function, old_name).
+    # ✓ Parameter 'address' for tools like decompile_function_by_address and rename_function_by_address refers to the numerical memory address.
+    # ✓ DO NOT use the "FUN_" prefix when providing an address to tools expecting a numerical address (e.g., use address="14024DA90", not address="FUN_14024DA90").
+    # ✓ DO NOT use "0x" prefix when providing an address (e.g., use address="14024DA90", not address="0x14024DA90").
+    # ✓ DO ensure a function exists (e.g., via list_functions or search_functions_by_name) before trying to decompile or rename it by name.
+    # ✓ For decompile_function (by name), use the full function name (e.g., name="FUN_14024DA90", or name="main").
+    # ✓ For decompile_function_by_address, use the numerical address (e.g., address="14024DA90").
+    # ✓ Be precise with tool selection: decompile_function is for names, decompile_function_by_address is for numerical addresses.
     """
     
     evaluation_system_prompt: str = """
@@ -361,7 +403,16 @@ class BridgeConfig:
     log_console: bool = True
     log_file_enabled: bool = True
     context_limit: int = 5  # Number of previous exchanges to include in context
-    max_steps: int = 5  # Maximum number of steps for tool execution
+    
+    # This will be the primary value loaded from MAX_STEPS env var
+    max_steps: int = 5
+    
+    # These will also be set to the value of MAX_STEPS from env for consistency
+    # if other parts of the code rely on these specific names.
+    # They are now instance fields, not class-level constants.
+    MAX_STEPS: int = 5 
+    MAX_GOAL_STEPS: int = 5
+    MAX_REVIEW_STEPS: int = 5
     
     # CAG Configuration
     cag_enabled: bool = True
@@ -377,11 +428,6 @@ class BridgeConfig:
     
     # Knowledge Base directory
     KNOWLEDGE_BASE_DIR = "knowledge_base"
-    
-    # Maximum steps for each phase
-    MAX_STEPS = 5
-    MAX_GOAL_STEPS = 5
-    MAX_REVIEW_STEPS = 5
     
     # Enable or disable review phase
     ENABLE_REVIEW = True
@@ -433,7 +479,8 @@ class BridgeConfig:
         
         # Load Bridge configuration
         context_limit = int(os.getenv("CONTEXT_LIMIT", "5"))
-        max_steps = int(os.getenv("MAX_STEPS", "5"))
+        # max_steps is loaded from MAX_STEPS env var, this becomes the single source of truth for step limits
+        loaded_max_steps = int(os.getenv("MAX_STEPS", "5")) 
         
         # Load CAG configuration
         cag_enabled = os.getenv("CAG_ENABLED", "true").lower() == "true"
@@ -450,7 +497,10 @@ class BridgeConfig:
             log_console=log_console,
             log_file_enabled=log_file_enabled,
             context_limit=context_limit,
-            max_steps=max_steps,
+            max_steps=loaded_max_steps, # Set max_steps from env
+            MAX_STEPS=loaded_max_steps, # Ensure MAX_STEPS is also set from the same env var
+            MAX_GOAL_STEPS=loaded_max_steps, # Ensure MAX_GOAL_STEPS is also set from the same env var
+            MAX_REVIEW_STEPS=loaded_max_steps, # Ensure MAX_REVIEW_STEPS is also set from the same env var
             cag_enabled=cag_enabled,
             cag_knowledge_cache_enabled=cag_knowledge_cache_enabled,
             cag_session_cache_enabled=cag_session_cache_enabled,

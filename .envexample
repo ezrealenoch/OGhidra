@@ -42,4 +42,4 @@ LOG_FILE_ENABLED=true
 
 # Bridge Configuration
 CONTEXT_LIMIT=5                     # Number of previous exchanges to include in context
-MAX_STEPS=10                        # Max number of planned steps to execute per query 
+MAX_STEPS=10                        # Maximum number of tool execution steps the agent can take per query. This is the single source of truth for step limits. 

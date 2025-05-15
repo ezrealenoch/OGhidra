@@ -21,10 +21,8 @@ This workplan outlines how to capture and organize knowledge about a binary duri
    EXECUTE: list_exports()
    ```
 
-4. **Extract strings to find potential clues**:
-   ```
-   EXECUTE: list_strings()
-   ```
+4. **Identify potential string clues**:
+   (Note: A direct `list_strings()` tool is not currently available. Analyze decompiled functions known to handle or reference string data. Look for calls to string manipulation library functions or direct memory references to string-like data segments.)
 
 5. **Summarize findings** into a structured overview:
    - Binary type (executable, DLL, etc.)
@@ -53,10 +51,8 @@ This workplan outlines how to capture and organize knowledge about a binary duri
    - Data structures accessed
    - Error handling patterns
 
-3. **Find cross-references to the function**:
-   ```
-   EXECUTE: find_references_to(name="FUN_14000A000")
-   ```
+3. **Understand function context (callers and callees)**:
+   (Note: A direct `find_references_to()` or specific caller/callee listing tool is not currently available. To understand context, decompile functions that appear to call this function, or functions that this function calls, based on analysis of the current function's decompiled code and any identifiable function names.)
 
 4. **Examine calling functions for context**:
    ```
@@ -137,4 +133,4 @@ This workplan outlines how to capture and organize knowledge about a binary duri
 ### Common Errors and Solutions:
 - Set a reasonable depth limit for recursive analysis to avoid getting overwhelmed
 - Focus on unique or custom functions rather than standard library functions
-- Use a breadth-first approach for large function sets to gain broader understanding first 
+- Use a breadth-first approach for large function sets to gain broader understanding first
